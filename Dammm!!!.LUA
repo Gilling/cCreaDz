@@ -5149,7 +5149,7 @@ task.spawn(function()
                         end
                     end
 
-                    if #groupUnits > 0 then
+                    if #groupUnits >= 4 then -- require at least 4 buffer units for Infinity Buff
                         totalBuffersPlaced = totalBuffersPlaced + #groupUnits
 
                         -- Sync last cast time from actual units if cast externally
