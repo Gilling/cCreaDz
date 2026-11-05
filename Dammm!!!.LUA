@@ -5081,13 +5081,32 @@ task.spawn(function()
     end
 end)
 
+-- Check if all buffer units in a group are within buff range of each other
+function AreUnitsInRange(units)
+    if #units < 2 then return true end
+    local BUFF_RANGE = 30 -- default buff radius; adjust if game uses different value
+    for i = 1, #units - 1 do
+        for j = i + 1, #units do
+            local partA = units[i]:FindFirstChild("HumanoidRootPart") or units[i].PrimaryPart or units[i]:FindFirstChildWhichIsA("BasePart")
+            local partB = units[j]:FindFirstChild("HumanoidRootPart") or units[j].PrimaryPart or units[j]:FindFirstChildWhichIsA("BasePart")
+            if partA and partB then
+                if (partA.Position - partB.Position).Magnitude > BUFF_RANGE then
+                    return false
+                end
+            end
+        end
+    end
+    return true
+end
+
 -- Dedicated Infinity Buff rotation worker supporting Elfy (Sylph), Commander (Erwin), and Windsong (Wendy)
 task.spawn(function()
     local BUFF_DURATION = 30
     local groupTrackers = {
         elfy = { lastCastTick = 0, lastAttemptTick = 0, lastUnit = nil, handOffThreshold = 0.35 },
-        commander = { lastCastTick = 0, lastAttemptTick = 0, lastUnit = nil, handOffThreshold = 0.25 },
-        windsong = { lastCastTick = 0, lastAttemptTick = 0, lastUnit = nil, handOffThreshold = 0.25 },
+        commander = { lastCastTick = 0, lastAttemptTick = 0, lastUnit = nil, handOffThreshold = 0.35 },
+        windsong = { lastCastTick = 0, lastAttemptTick = 0, lastUnit = nil, handOffThreshold = 0.35 },
+        hybrid = { lastCastTick = 0, lastAttemptTick = 0, lastUnit = nil, handOffThreshold = 0.35 },
     }
 
     local BUFFER_GROUPS = {
@@ -5111,6 +5130,15 @@ task.spawn(function()
             buffType = "Magic",
             stateKey = "InfinityBuffWindsong",
             checkFn = IsWindsongUnit,
+        },
+        {
+            key = "hybrid",
+            displayName = "Hybrid (All Buffers)",
+            buffType = "Magic",
+            stateKey = "InfinityBuff",
+            checkFn = function(unit)
+                return IsElfyUnit(unit) or IsCommanderUnit(unit) or IsWindsongUnit(unit)
+            end,
         },
     }
 
@@ -5164,26 +5192,35 @@ task.spawn(function()
                         end
 
                         local timeSinceLast = tracker.lastCastTick > 0 and (now - tracker.lastCastTick) or 9999
--- Determine SPA base and Curse SPA for this group (use first unit as representative)
-local spaBase = 0.75
-local curseMod = 0
-if #groupUnits > 0 then
-    local stats0 = groupUnits[1]:FindFirstChild("_stats")
-    if stats0 then
-        local baseVal = stats0:FindFirstChild("_attack_speed") or stats0:FindFirstChild("attack_speed") or stats0:FindFirstChild("attack_cooldown")
-        if baseVal and baseVal.Value then
-            spaBase = tonumber(baseVal.Value) or spaBase
-        end
-        local curseVal = stats0:FindFirstChild("curse_spa") or stats0:FindFirstChild("spa_curse")
-        if curseVal and curseVal.Value then
-            curseMod = tonumber(curseVal.Value) or 0
-        end
-    end
-end
-local realSPA = spaBase * (1 + curseMod/100)
-local realCooldown = BUFF_DURATION * (realSPA / spaBase)
-local handOffThresh = math.max(0, BUFF_DURATION - (realCooldown - 0.25))
-tracker.handOffThreshold = handOffThresh
+
+                        -- Determine SPA base and Curse SPA for this group (use first unit as representative)
+                        local spaBase = 0.75
+                        local curseMod = 0
+                        if #groupUnits > 0 then
+                            local stats0 = groupUnits[1]:FindFirstChild("_stats")
+                            if stats0 then
+                                local baseVal = stats0:FindFirstChild("_attack_speed") or stats0:FindFirstChild("attack_speed") or stats0:FindFirstChild("attack_cooldown")
+                                if baseVal and baseVal.Value then
+                                    spaBase = tonumber(baseVal.Value) or spaBase
+                                end
+                                local curseVal = stats0:FindFirstChild("curse_spa") or stats0:FindFirstChild("spa_curse")
+                                if curseVal and curseVal.Value then
+                                    curseMod = tonumber(curseVal.Value) or 0
+                                end
+                            end
+                        end
+                        local realSPA = spaBase * (1 + curseMod / 100)
+                        local realCooldown = BUFF_DURATION * (realSPA / spaBase)
+                        -- Safety margin 0.15s: hand-off starts slightly before buff expires
+                        local safetyMargin = 0.15
+                        local handOffThresh = math.max(0, BUFF_DURATION - (realCooldown - safetyMargin))
+                        tracker.handOffThreshold = handOffThresh
+
+                        -- Check if units are within buff range of each other
+                        if not AreUnitsInRange(groupUnits) then
+                            table.insert(activeGroupSummaries, string.format("%s: Units out of range!", groupDef.displayName))
+                        else
+
                         local isRunning = timeSinceLast < BUFF_DURATION
                         local remTime = math.max(0, BUFF_DURATION - timeSinceLast)
 
@@ -5195,7 +5232,9 @@ tracker.handOffThreshold = handOffThresh
                             end
                         end
 
-                        local shouldCastNext = (not isRunning) or (remTime <= tracker.handOffThreshold)
+                        -- Pre-cast margin 0.1s: trigger hand-off slightly before threshold
+                        local preCastMargin = 0.1
+                        local shouldCastNext = (not isRunning) or (remTime <= tracker.handOffThreshold + preCastMargin)
 
                         if shouldCastNext then
                             if (now - tracker.lastAttemptTick) >= 0.6 then
@@ -5262,6 +5301,7 @@ tracker.handOffThreshold = handOffThresh
                         else
                             table.insert(activeGroupSummaries, string.format("%s: %.1fs (%s 100%%)", groupDef.displayName, remTime, groupDef.buffType))
                         end
+                        end -- close AreUnitsInRange else block
                     end
                 end
             end
