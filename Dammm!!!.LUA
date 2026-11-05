@@ -5085,9 +5085,9 @@ end)
 task.spawn(function()
     local BUFF_DURATION = 30
     local groupTrackers = {
-        elfy = { lastCastTick = 0, lastAttemptTick = 0, lastUnit = nil },
-        commander = { lastCastTick = 0, lastAttemptTick = 0, lastUnit = nil },
-        windsong = { lastCastTick = 0, lastAttemptTick = 0, lastUnit = nil },
+        elfy = { lastCastTick = 0, lastAttemptTick = 0, lastUnit = nil, handOffThreshold = 0.25 },
+        commander = { lastCastTick = 0, lastAttemptTick = 0, lastUnit = nil, handOffThreshold = 0.25 },
+        windsong = { lastCastTick = 0, lastAttemptTick = 0, lastUnit = nil, handOffThreshold = 0.25 },
     }
 
     local BUFFER_GROUPS = {
