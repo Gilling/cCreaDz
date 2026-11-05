@@ -1063,22 +1063,59 @@ function GetUnitActiveReadyStatus(unit)
     return false, cdRemaining, false
 end
 
-function IsBuffTypeActiveOnUnits(playerUnits, damageType)
+function GetUnitBuffValue(unit, damageType)
+    if not unit or not unit.Parent then
+        return 0
+    end
+    local stats = unit:FindFirstChild("_stats")
+    if not stats then
+        return 0
+    end
     local attrName = damageType == "Physical" and "_dmg_buff_physical" or "_dmg_buff_magic"
-    for _, u in ipairs(playerUnits) do
-        local stats = u:FindFirstChild("_stats")
-        if stats then
-            local dmgBuff = stats:GetAttribute(attrName)
-            if dmgBuff and tonumber(dmgBuff) and tonumber(dmgBuff) > 0 then
-                return true, tonumber(dmgBuff)
+    local dmgBuff = tonumber(stats:GetAttribute(attrName)) or 0
+    local multi = stats:FindFirstChild("buff_damage_multiplier")
+    local multiVal = (multi and tonumber(multi.Value)) or 0
+    if multiVal > 0 and multiVal ~= 1 then
+        if multiVal > 1 then
+            dmgBuff = math.max(dmgBuff, multiVal - 1)
+        else
+            dmgBuff = dmgBuff + multiVal
+        end
+    end
+
+    if dmgBuff <= 0 then
+        pcall(function()
+            local Loader = require(ReplicatedStorage.src.Loader)
+            local BuffServiceClient = Loader.load_client_service(game, "BuffServiceClient")
+            local unitData = BuffServiceClient and BuffServiceClient.UNIT_BUFF_DATA and BuffServiceClient.UNIT_BUFF_DATA[unit]
+            if unitData and unitData.instance_data then
+                for _, inst in pairs(unitData.instance_data) do
+                    if type(inst) == "table" and type(inst.params) == "table" then
+                        local bType = tostring(inst.params.buff_type or "")
+                        if bType:find("buff", 1, true) or inst.params.damage_types or inst.params.damage_add then
+                            dmgBuff = math.max(dmgBuff, 0.25)
+                        end
+                    end
+                end
             end
-            local multi = stats:FindFirstChild("buff_damage_multiplier")
-            if multi and tonumber(multi.Value) and tonumber(multi.Value) > 1 then
-                return true, tonumber(multi.Value)
+        end)
+    end
+    return dmgBuff
+end
+
+function IsBuffTypeActiveOnUnits(playerUnits, damageType)
+    local maxBuff = 0
+    local anyActive = false
+    for _, u in ipairs(playerUnits) do
+        local val = GetUnitBuffValue(u, damageType)
+        if val > 0 then
+            anyActive = true
+            if val > maxBuff then
+                maxBuff = val
             end
         end
     end
-    return false, 0
+    return anyActive, maxBuff
 end
 
 function GetEquippedUnitList()
@@ -5084,13 +5121,18 @@ end)
 -- Check if all buffer units in a group are within buff range of each other
 function AreUnitsInRange(units)
     if #units < 2 then return true end
-    local BUFF_RANGE = 30 -- default buff radius; adjust if game uses different value
     for i = 1, #units - 1 do
         for j = i + 1, #units do
+            local statsA = units[i]:FindFirstChild("_stats")
+            local statsB = units[j]:FindFirstChild("_stats")
+            local rA = (statsA and statsA:FindFirstChild("range") and tonumber(statsA.range.Value)) or 25
+            local rB = (statsB and statsB:FindFirstChild("range") and tonumber(statsB.range.Value)) or 25
+            local maxRange = math.max(rA, rB, 25) + 5
             local partA = units[i]:FindFirstChild("HumanoidRootPart") or units[i].PrimaryPart or units[i]:FindFirstChildWhichIsA("BasePart")
             local partB = units[j]:FindFirstChild("HumanoidRootPart") or units[j].PrimaryPart or units[j]:FindFirstChildWhichIsA("BasePart")
             if partA and partB then
-                if (partA.Position - partB.Position).Magnitude > BUFF_RANGE then
+                local dist2D = Vector2.new(partA.Position.X - partB.Position.X, partA.Position.Z - partB.Position.Z).Magnitude
+                if dist2D > maxRange then
                     return false
                 end
             end
@@ -5100,13 +5142,13 @@ function AreUnitsInRange(units)
 end
 
 -- Dedicated Infinity Buff rotation worker supporting Elfy (Sylph), Commander (Erwin), and Windsong (Wendy)
+-- Uses Event-Driven + Real-Time Attribute Drop & Escalation Detection for 0-downtime 100% buff loop
 task.spawn(function()
     local BUFF_DURATION = 30
     local groupTrackers = {
-        elfy = { lastCastTick = 0, lastAttemptTick = 0, lastUnit = nil, handOffThreshold = 0.35 },
-        commander = { lastCastTick = 0, lastAttemptTick = 0, lastUnit = nil, handOffThreshold = 0.35 },
-        windsong = { lastCastTick = 0, lastAttemptTick = 0, lastUnit = nil, handOffThreshold = 0.35 },
-        hybrid = { lastCastTick = 0, lastAttemptTick = 0, lastUnit = nil, handOffThreshold = 0.35 },
+        elfy = { lastCastTick = 0, lastAttemptTick = 0, lastUnit = nil, handOffThreshold = 0.35, lastBuffVal = 0, buffStartTick = 0 },
+        commander = { lastCastTick = 0, lastAttemptTick = 0, lastUnit = nil, handOffThreshold = 0.35, lastBuffVal = 0, buffStartTick = 0 },
+        windsong = { lastCastTick = 0, lastAttemptTick = 0, lastUnit = nil, handOffThreshold = 0.35, lastBuffVal = 0, buffStartTick = 0 },
     }
 
     local BUFFER_GROUPS = {
@@ -5131,19 +5173,10 @@ task.spawn(function()
             stateKey = "InfinityBuffWindsong",
             checkFn = IsWindsongUnit,
         },
-        {
-            key = "hybrid",
-            displayName = "Hybrid (All Buffers)",
-            buffType = "Magic",
-            stateKey = "InfinityBuff",
-            checkFn = function(unit)
-                return IsElfyUnit(unit) or IsCommanderUnit(unit) or IsWindsongUnit(unit)
-            end,
-        },
     }
 
     while true do
-        task.wait(0.15)
+        task.wait(0.05) -- High-frequency 50ms check for zero-downtime hand-off
         local workerOk, workerErr = pcall(function()
             if not State.InfinityBuff then
                 return
@@ -5153,6 +5186,8 @@ task.spawn(function()
                 for _, tracker in pairs(groupTrackers) do
                     tracker.lastCastTick = 0
                     tracker.lastUnit = nil
+                    tracker.lastBuffVal = 0
+                    tracker.buffStartTick = 0
                 end
                 UpdateInfinityBuffStatus("Idle (Waiting for Match)", Color3.fromRGB(160, 160, 180))
                 return
@@ -5177,131 +5212,159 @@ task.spawn(function()
                         end
                     end
 
-                    if #groupUnits >= 2 then -- require at least 2 buffer units; if threshold is zero will later enforce 4
+                    if #groupUnits > 0 then
                         totalBuffersPlaced = totalBuffersPlaced + #groupUnits
 
-                        -- Sync last cast time from actual units if cast externally
-                        for _, unit in ipairs(groupUnits) do
-                            local stats = unit:FindFirstChild("_stats")
-                            local lastCastVal = stats and stats:FindFirstChild("last_active_cast")
-                            local lc = tonumber(lastCastVal and lastCastVal.Value) or 0
-                            if lc > tracker.lastCastTick and (now - lc) < (BUFF_DURATION + 5) then
-                                tracker.lastCastTick = lc
-                                tracker.lastUnit = unit
-                            end
-                        end
-
-                        local timeSinceLast = tracker.lastCastTick > 0 and (now - tracker.lastCastTick) or 9999
-
-                        -- Determine SPA base and Curse SPA for this group (use first unit as representative)
-                        local spaBase = 0.75
-                        local curseMod = 0
-                        if #groupUnits > 0 then
-                            local stats0 = groupUnits[1]:FindFirstChild("_stats")
-                            if stats0 then
-                                local baseVal = stats0:FindFirstChild("_attack_speed") or stats0:FindFirstChild("attack_speed") or stats0:FindFirstChild("attack_cooldown")
-                                if baseVal and baseVal.Value then
-                                    spaBase = tonumber(baseVal.Value) or spaBase
-                                end
-                                local curseVal = stats0:FindFirstChild("curse_spa") or stats0:FindFirstChild("spa_curse")
-                                if curseVal and curseVal.Value then
-                                    curseMod = tonumber(curseVal.Value) or 0
-                                end
-                            end
-                        end
-                        local realSPA = spaBase * (1 + curseMod / 100)
-                        local realCooldown = BUFF_DURATION * (realSPA / spaBase)
-                        -- Safety margin 0.15s: hand-off starts slightly before buff expires
-                        local safetyMargin = 0.15
-                        local handOffThresh = math.max(0, BUFF_DURATION - (realCooldown - safetyMargin))
-                        tracker.handOffThreshold = handOffThresh
-
-                        -- Check if units are within buff range of each other
-                        if not AreUnitsInRange(groupUnits) then
-                            table.insert(activeGroupSummaries, string.format("%s: Units out of range!", groupDef.displayName))
+                        if #groupUnits < 3 then
+                            table.insert(activeGroupSummaries, string.format("%s: Placed %d/4 (Need >=3-4)", groupDef.displayName, #groupUnits))
                         else
+                            -- 1. Sync actual last_active_cast from all units in this group
+                            -- And calculate each unit's real active cooldown (accounting for Curse / Traits)
+                            local maxUnitCd = 60
+                            for _, unit in ipairs(groupUnits) do
+                                local stats = unit:FindFirstChild("_stats")
+                                local lastCastVal = stats and stats:FindFirstChild("last_active_cast")
+                                local cdVal = stats and stats:FindFirstChild("active_attack_cooldown")
+                                local unitCd = (cdVal and tonumber(cdVal.Value)) or 60
+                                if unitCd > maxUnitCd then
+                                    maxUnitCd = unitCd
+                                end
 
-                        local isRunning = timeSinceLast < BUFF_DURATION
-                        local remTime = math.max(0, BUFF_DURATION - timeSinceLast)
-
-                        local attrActive, attrVal = IsBuffTypeActiveOnUnits(allPlayerUnits, groupDef.buffType)
-                        if not isRunning and attrActive then
-                            isRunning = true
-                            if remTime <= 0 then
-                                remTime = 5
+                                local lc = tonumber(lastCastVal and lastCastVal.Value) or 0
+                                if lc > tracker.lastCastTick and (now - lc) < (BUFF_DURATION + 5) then
+                                    tracker.lastCastTick = lc
+                                    tracker.lastUnit = unit
+                                end
                             end
-                        end
 
-                        -- Pre-cast margin 0.1s: trigger hand-off slightly before threshold
-                        local preCastMargin = 0.1
-                        local shouldCastNext = (not isRunning) or (remTime <= tracker.handOffThreshold + preCastMargin)
+                            -- 2. Read real-time buff multiplier on the buffer units themselves
+                            local currentGroupBuff = 0
+                            for _, unit in ipairs(groupUnits) do
+                                local bVal = GetUnitBuffValue(unit, groupDef.buffType)
+                                if bVal > currentGroupBuff then
+                                    currentGroupBuff = bVal
+                                end
+                            end
+                            if currentGroupBuff <= 0 then
+                                local _, teamBuff = IsBuffTypeActiveOnUnits(allPlayerUnits, groupDef.buffType)
+                                currentGroupBuff = teamBuff or 0
+                            end
 
-                        if shouldCastNext then
-                            if (now - tracker.lastAttemptTick) >= 0.6 then
-                                local readyCandidates = {}
-                                local minCd = 9999
+                            -- Detect buff state changes (when buff drops or refreshes)
+                            local buffDropped = (tracker.lastBuffVal > 0 and currentGroupBuff < tracker.lastBuffVal - 0.01)
+                            if currentGroupBuff > tracker.lastBuffVal + 0.01 then
+                                tracker.buffStartTick = now
+                            end
+                            tracker.lastBuffVal = currentGroupBuff
 
-                                for _, unit in ipairs(groupUnits) do
-                                    local isReady, cdRem = GetUnitActiveReadyStatus(unit)
-                                    if isReady then
+                            -- 3. Calculate precise timing and hand-off threshold per unit cooldown
+                            -- Standard active skill duration = 30s, base cooldown = 60s.
+                            -- With 4 units and +SPA curse (e.g. 61.5s - 66s cooldown), each cast must happen
+                            -- right as the previous buff expires (or 0.25s-0.45s before expiry so animations/network resolve in time).
+                            local curseRatio = maxUnitCd / 60.0
+                            local safetyMargin = 0.35 -- Pre-cast 0.35s before buff expires to beat network latency
+                            local handOffThresh = math.clamp(safetyMargin * curseRatio, 0.20, 0.80)
+                            tracker.handOffThreshold = handOffThresh
+
+                            local timeSinceLast = tracker.lastCastTick > 0 and (now - tracker.lastCastTick) or 9999
+                            local isRunning = (timeSinceLast < BUFF_DURATION) and (currentGroupBuff > 0 or timeSinceLast < 1.5)
+                            local remTime = isRunning and math.max(0, BUFF_DURATION - timeSinceLast) or 0
+
+                            -- Trigger next cast if:
+                            -- a) No buff is currently running, OR
+                            -- b) Buff multiplier just dropped (previous tier expired!), OR
+                            -- c) Remaining duration on current 30s buff is within handOffThreshold
+                            local shouldCastNext = (not isRunning) or buffDropped or (remTime <= tracker.handOffThreshold)
+
+                            if shouldCastNext then
+                                if (now - tracker.lastAttemptTick) >= 0.25 then
+                                    local readyCandidates = {}
+                                    local minCd = 9999
+
+                                    for idx, unit in ipairs(groupUnits) do
+                                        local isReady, cdRem = GetUnitActiveReadyStatus(unit)
                                         local stats = unit:FindFirstChild("_stats")
                                         local lastCastVal = stats and stats:FindFirstChild("last_active_cast")
                                         local lc = tonumber(lastCastVal and lastCastVal.Value) or 0
-                                        table.insert(readyCandidates, { unit = unit, lastCast = lc })
-                                    else
-                                        if cdRem < minCd then
-                                            minCd = cdRem
-                                        end
-                                    end
-                                end
+                                        local unitBuffVal = GetUnitBuffValue(unit, groupDef.buffType)
 
-                                if #readyCandidates > 0 then
-                                    if #groupUnits > 1 and #readyCandidates > 1 and tracker.lastUnit then
-                                        local filtered = {}
-                                        for _, cand in ipairs(readyCandidates) do
-                                            if cand.unit ~= tracker.lastUnit then
-                                                table.insert(filtered, cand)
+                                        -- Prevent double-casting a unit that just cast within 2 seconds
+                                        if isReady and (now - lc) > 2.0 then
+                                            table.insert(readyCandidates, {
+                                                unit = unit,
+                                                lastCast = lc,
+                                                buffVal = unitBuffVal,
+                                                index = idx
+                                            })
+                                        else
+                                            if cdRem < minCd then
+                                                minCd = cdRem
                                             end
                                         end
-                                        if #filtered > 0 then
-                                            readyCandidates = filtered
+                                    end
+
+                                    if #readyCandidates > 0 then
+                                        -- Exclude the unit that cast most recently if another unit is ready
+                                        if #groupUnits > 1 and #readyCandidates > 1 and tracker.lastUnit then
+                                            local filtered = {}
+                                            for _, cand in ipairs(readyCandidates) do
+                                                if cand.unit ~= tracker.lastUnit then
+                                                    table.insert(filtered, cand)
+                                                end
+                                            end
+                                            if #filtered > 0 then
+                                                readyCandidates = filtered
+                                            end
+                                        end
+
+                                        -- Sort candidates:
+                                        -- 1) Prefer the unit that currently has the HIGHEST buff multiplier on itself (to escalate 25% -> 56% -> 95% -> 100%)
+                                        -- 2) Tie-breaker: unit that cast longest ago (FIFO rotation 1 -> 2 -> 3 -> 4 -> 1)
+                                        table.sort(readyCandidates, function(a, b)
+                                            if math.abs(a.buffVal - b.buffVal) > 0.01 then
+                                                return a.buffVal > b.buffVal
+                                            end
+                                            if math.abs(a.lastCast - b.lastCast) > 0.5 then
+                                                return a.lastCast < b.lastCast
+                                            end
+                                            return a.index < b.index
+                                        end)
+
+                                        local chosen = readyCandidates[1].unit
+                                        tracker.lastAttemptTick = now
+
+                                        local castOk = false
+                                        pcall(function()
+                                            local res = InvokeEndpoint("use_active_attack", chosen)
+                                            castOk = (res ~= false)
+                                        end)
+
+                                        if castOk then
+                                            -- Wait up to 0.3s to verify server accepted the cast (last_active_cast updated)
+                                            tracker.lastCastTick = now
+                                            tracker.lastUnit = chosen
+                                            local pct = math.floor((currentGroupBuff > 0 and currentGroupBuff or 0.25) * 100 + 0.5)
+                                            table.insert(activeGroupSummaries, string.format("%s: Cast (%d%% -> 100%%)", groupDef.displayName, pct))
+                                        else
+                                            table.insert(activeGroupSummaries, string.format("%s: Retry Cast...", groupDef.displayName))
+                                        end
+                                    else
+                                        if minCd < 9999 then
+                                            table.insert(activeGroupSummaries, string.format("%s: Wait CD %.1fs", groupDef.displayName, minCd))
+                                        else
+                                            table.insert(activeGroupSummaries, string.format("%s: Wait Skill (Upgrade Unit)", groupDef.displayName))
                                         end
                                     end
-
-                                    table.sort(readyCandidates, function(a, b)
-                                        return a.lastCast < b.lastCast
-                                    end)
-
-                                    local chosen = readyCandidates[1].unit
-                                    tracker.lastAttemptTick = now
-
-                                    local castOk = false
-                                    pcall(function()
-                                        local res = InvokeEndpoint("use_active_attack", chosen)
-                                        castOk = (res ~= false)
-                                    end)
-
-                                    if castOk then
-                                        tracker.lastCastTick = now
-                                        tracker.lastUnit = chosen
-                                        table.insert(activeGroupSummaries, string.format("%s: Cast -> 100%%", groupDef.displayName))
-                                    else
-                                        table.insert(activeGroupSummaries, string.format("%s: Cast Failed", groupDef.displayName))
-                                    end
                                 else
-                                    if minCd < 9999 then
-                                        table.insert(activeGroupSummaries, string.format("%s: Wait CD %.1fs", groupDef.displayName, minCd))
-                                    else
-                                        table.insert(activeGroupSummaries, string.format("%s: Wait Skill", groupDef.displayName))
-                                    end
+                                    local pct = math.floor(currentGroupBuff * 100 + 0.5)
+                                    table.insert(activeGroupSummaries, string.format("%s: Syncing (%d%%)", groupDef.displayName, pct))
                                 end
                             else
-                                table.insert(activeGroupSummaries, string.format("%s: Preparing...", groupDef.displayName))
+                                local pct = math.floor((currentGroupBuff > 0 and currentGroupBuff or 1) * 100 + 0.5)
+                                local rangeWarn = (not AreUnitsInRange(groupUnits)) and " [Check Range]" or ""
+                                table.insert(activeGroupSummaries, string.format("%s: %.1fs (%d%% %s)%s", groupDef.displayName, remTime, pct, groupDef.buffType, rangeWarn))
                             end
-                        else
-                            table.insert(activeGroupSummaries, string.format("%s: %.1fs (%s 100%%)", groupDef.displayName, remTime, groupDef.buffType))
                         end
-                        end -- close AreUnitsInRange else block
                     end
                 end
             end
