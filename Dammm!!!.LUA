@@ -5085,7 +5085,7 @@ end)
 task.spawn(function()
     local BUFF_DURATION = 30
     local groupTrackers = {
-        elfy = { lastCastTick = 0, lastAttemptTick = 0, lastUnit = nil, handOffThreshold = 0.25 },
+        elfy = { lastCastTick = 0, lastAttemptTick = 0, lastUnit = nil, handOffThreshold = 0.35 },
         commander = { lastCastTick = 0, lastAttemptTick = 0, lastUnit = nil, handOffThreshold = 0.25 },
         windsong = { lastCastTick = 0, lastAttemptTick = 0, lastUnit = nil, handOffThreshold = 0.25 },
     }
@@ -5195,7 +5195,7 @@ tracker.handOffThreshold = handOffThresh
                             end
                         end
 
-                        local shouldCastNext = (not isRunning) or (remTime <= 0.25)
+                        local shouldCastNext = (not isRunning) or (remTime <= tracker.handOffThreshold)
 
                         if shouldCastNext then
                             if (now - tracker.lastAttemptTick) >= 0.6 then
