@@ -5149,7 +5149,7 @@ task.spawn(function()
                         end
                     end
 
-                    if #groupUnits >= 4 then -- require at least 4 buffer units for Infinity Buff
+                    if #groupUnits >= 2 then -- require at least 2 buffer units; if threshold is zero will later enforce 4
                         totalBuffersPlaced = totalBuffersPlaced + #groupUnits
 
                         -- Sync last cast time from actual units if cast externally
@@ -5164,6 +5164,26 @@ task.spawn(function()
                         end
 
                         local timeSinceLast = tracker.lastCastTick > 0 and (now - tracker.lastCastTick) or 9999
+-- Determine SPA base and Curse SPA for this group (use first unit as representative)
+local spaBase = 0.75
+local curseMod = 0
+if #groupUnits > 0 then
+    local stats0 = groupUnits[1]:FindFirstChild("_stats")
+    if stats0 then
+        local baseVal = stats0:FindFirstChild("_attack_speed") or stats0:FindFirstChild("attack_speed") or stats0:FindFirstChild("attack_cooldown")
+        if baseVal and baseVal.Value then
+            spaBase = tonumber(baseVal.Value) or spaBase
+        end
+        local curseVal = stats0:FindFirstChild("curse_spa") or stats0:FindFirstChild("spa_curse")
+        if curseVal and curseVal.Value then
+            curseMod = tonumber(curseVal.Value) or 0
+        end
+    end
+end
+local realSPA = spaBase * (1 + curseMod/100)
+local realCooldown = BUFF_DURATION * (realSPA / spaBase)
+local handOffThresh = math.max(0, BUFF_DURATION - (realCooldown - 0.25))
+tracker.handOffThreshold = handOffThresh
                         local isRunning = timeSinceLast < BUFF_DURATION
                         local remTime = math.max(0, BUFF_DURATION - timeSinceLast)
 
