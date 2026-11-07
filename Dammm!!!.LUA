@@ -2482,15 +2482,20 @@ end
 function HttpPost(url, body)
     local payload = {
         Url = url,
+        url = url,
         Method = "POST",
+        method = "POST",
         Headers = { ["Content-Type"] = "application/json" },
+        headers = { ["Content-Type"] = "application/json" },
         Body = body,
+        body = body,
     }
     local fn = (syn and syn.request)
         or (http and http.request)
         or http_request
         or request
         or (fluxus and fluxus.request)
+        or (getgenv and (getgenv().request or getgenv().http_request))
     if fn then
         return fn(payload)
     end
@@ -3617,34 +3622,39 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     local problem = WebhookProblem(url)
     if problem then
         warn("[Octoput Hub Webhook] " .. problem)
-        return false
+        return false, problem
     end
 
-    -- Fast authoritative settings check: polls every 0.1s up to 25 times (2.5s max)
-    local resultDetails
-    for attempt = 1, 25 do
+    print("[Octoput Hub Webhook] Preparing match-end payload...")
+
+    -- Fast result check: poll every 0.1s up to 6 times (0.6s max)
+    -- As soon as we have authoritative settings OR a definitive VICTORY/DEFEAT result, break immediately!
+    local resultDetails = {}
+    for attempt = 1, 6 do
         local currentSettings = ReadAuthoritativeResultSettings()
         if currentSettings and currentSettings ~= webhookResultSettingsAtStart then
             resultDetails = GetResultDetails()
             if resultDetails.authoritative then break end
         end
+        local currentDetails = GetResultDetails()
+        if currentDetails and currentDetails.result and currentDetails.result ~= "" and currentDetails.result ~= webhookResultTitleAtStart then
+            resultDetails = currentDetails
+            break
+        end
         task.wait(0.1)
     end
     resultDetails = resultDetails or GetResultDetails()
-    if not resultDetails.authoritative and resultDetails.result == webhookResultTitleAtStart then
-        resultDetails.result = nil
-    end
     local outcome = ResolveWebhookOutcome(resultDetails)
 
-    -- Fast inventory snapshot: polls every 0.1s up to 10 times (1.0s max)
+    -- Quick inventory snapshot: 3 attempts at 0.1s (0.3s max)
     local inventoryRewardsAfter, inventoryRewardsAvailable, invProfAfter, colProfAfter
-    for attempt = 1, 10 do
+    for attempt = 1, 3 do
         inventoryRewardsAfter, inventoryRewardsAvailable, invProfAfter, colProfAfter = ReadInventoryRewardSnapshot()
         if inventoryRewardsAvailable then break end
         task.wait(0.1)
     end
 
-    -- Collect all drops from settings.new_items, settings.new_units, and inventory diff
+    -- Collect all drops from settings and inventory diff
     local allDrops = CollectAllMatchDrops(
         resultDetails and resultDetails.settings,
         secretBaseline,
@@ -3676,47 +3686,54 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
 
     local unitLines = unitLinesSnapshot or ReadMatchUnitLines()
 
-    local function LimitEmbedText(value, limit)
-        value = tostring(value or "")
+    -- Safe embed limiter: never allows empty string and avoids broken multi-byte UTF-8 slices
+    local function SafeLimitText(value, limit)
+        value = tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
+        if value == "" then return "None" end
         if #value <= limit then return value end
-        return value:sub(1, math.max(1, limit - 18)) .. "\n… (truncated)"
+        local truncated = value:sub(1, math.max(1, limit - 20))
+        local lastNl = truncated:match(".*()\n")
+        if lastNl and lastNl > 40 then
+            truncated = truncated:sub(1, lastNl - 1)
+        end
+        return truncated .. "\n… (truncated)"
     end
 
     local fields = {
         {
             name = "📊 Player Stats",
-            value = LimitEmbedText(playerStatsText, 1000),
+            value = SafeLimitText(playerStatsText, 1000),
             inline = false,
         },
         {
             name = "⏱️ Match Info",
-            value = LimitEmbedText(matchInfoText, 500),
+            value = SafeLimitText(matchInfoText, 500),
             inline = true,
         },
         {
             name = "🎁 Stage Rewards",
-            value = LimitEmbedText(stageRewardText, 500),
+            value = SafeLimitText(stageRewardText, 500),
             inline = true,
         },
         {
             name = "🎒 Dropped Items & Units",
-            value = LimitEmbedText(dropText, 1024),
+            value = SafeLimitText(dropText, 1024),
             inline = false,
         },
     }
 
-    if additionalRewardText then
+    if additionalRewardText and tostring(additionalRewardText):gsub("%s+", "") ~= "" then
         table.insert(fields, {
             name = "📈 Additional Rewards",
-            value = LimitEmbedText(additionalRewardText, 800),
+            value = SafeLimitText(additionalRewardText, 800),
             inline = false,
         })
     end
 
-    if unitLines and unitLines ~= "No placed unit stats found" then
+    if unitLines and unitLines ~= "No placed unit stats found" and tostring(unitLines):gsub("%s+", "") ~= "" then
         table.insert(fields, {
             name = "⚔️ Placed Units Performance",
-            value = LimitEmbedText(unitLines, 800),
+            value = SafeLimitText(unitLines, 800),
             inline = false,
         })
     end
@@ -3742,17 +3759,18 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     }
     local body = HttpService:JSONEncode(bodyTable)
 
+    print("[Octoput Hub Webhook] Sending match result to Discord...")
     local lastError = "Unknown HTTP error"
     local retryDelay
     for attempt = 1, 4 do
         local ok, response = pcall(HttpPost, url, body)
         local success, message, responseRetryAfter = DescribeWebhookResult(ok, response)
         if success then
-            print("[Octoput Hub Webhook] End-of-match notification sent.")
+            print("[Octoput Hub Webhook] Notification successfully delivered to Discord!")
             return true
         end
         lastError = message
-        retryDelay = responseRetryAfter or math.min(attempt * 2, 10)
+        retryDelay = responseRetryAfter or math.min(attempt * 2, 8)
         warn("[Octoput Hub Webhook] Attempt " .. tostring(attempt) .. "/4 failed: " .. tostring(message))
         if attempt < 4 then
             print("[Octoput Hub Webhook] Retrying in " .. tostring(retryDelay) .. "s.")
@@ -4213,6 +4231,11 @@ function CreateTextBox(parent, title, placeholder, layoutOrder, onChanged, initi
     InputPad.Parent = Input
 
     Input.FocusLost:Connect(function()
+        if onChanged then
+            onChanged(Input.Text)
+        end
+    end)
+    Input:GetPropertyChangedSignal("Text"):Connect(function()
         if onChanged then
             onChanged(Input.Text)
         end
@@ -5277,9 +5300,11 @@ CreateButton(WebhookPage, "Test Webhook", 4, function()
     if success then
         WebhookStatus.Text = "Success: " .. message
         WebhookStatus.TextColor3 = Color3.fromRGB(100, 255, 140)
+        print("[Octoput Hub Webhook Test] Success: " .. tostring(message))
     else
         WebhookStatus.Text = "Failed: " .. message
         WebhookStatus.TextColor3 = Color3.fromRGB(255, 120, 120)
+        warn("[Octoput Hub Webhook Test] Failed: " .. tostring(message))
     end
 end)
 WebhookStatus = CreateHint(WebhookPage, "Test result appears here.", 5, 48)
@@ -7029,25 +7054,22 @@ function StartWebhookEndSend(reason)
     local secretAvailable = webhookSecretRewardBaselineAvailable
     local unitLinesSnapshot = webhookUnitLinesSnapshot
 
-    print("[Octoput Hub Webhook] Sending match result. Trigger: " .. tostring(reason or "result"))
+    print("[Octoput Hub Webhook] Triggering webhook send. Reason: " .. tostring(reason or "result"))
     task.spawn(function()
-        local callOk, sendResult, sendError, retryDelay = pcall(SendEndWebhook, currencyBaseline, secretBaseline, secretAvailable, unitLinesSnapshot)
-        -- A previous match's HTTP request may finish after a new match has begun.
-        -- Never let that old task mutate the new match's send/retry state.
-        if webhookMatchToken ~= sendToken then
-            print("[Octoput Hub Webhook] Ignoring completion from an older match.")
-            return
-        end
+        local callOk, sendResult, sendError, retryDelay = pcall(function()
+            return SendEndWebhook(currencyBaseline, secretBaseline, secretAvailable, unitLinesSnapshot)
+        end)
+        -- Always unlock sending so future matches/retries are never blocked
         webhookSending = false
         if callOk and sendResult == true then
             webhookSent = true
             local finalDetails = GetResultDetails()
             webhookLastSentSettings = finalDetails and finalDetails.settings or nil
-            print("[Octoput Hub Webhook] Match-end webhook confirmed sent.")
+            print("[Octoput Hub Webhook] Match-end webhook confirmed sent successfully!")
         else
             local failure = callOk and tostring(sendError or "SendEndWebhook returned false") or tostring(sendResult)
             warn("[Octoput Hub Webhook] Send failed: " .. failure)
-            webhookRetryAt = os.clock() + math.clamp(tonumber(retryDelay) or 8, 3, 120)
+            webhookRetryAt = os.clock() + math.clamp(tonumber(retryDelay) or 4, 2, 60)
         end
     end)
     return true
@@ -7208,31 +7230,4 @@ task.spawn(function()
             end
 
             local hasEnded = finishedRising or (finished and webhookGameWasActive) or resultScreenConfirmed
-            if hasEnded and not webhookEndDetected then
-                MarkWebhookEnd(resultTitle ~= "" and resultTitle or (finished and "GameFinished" or "ResultsUI"))
-            end
-
-            if webhookEndDetected and State.WebhookOnEnd and not webhookSent
-                and not webhookSending and os.clock() >= webhookRetryAt then
-                StartWebhookEndSend(finished and "GameFinished" or "ResultsUI")
-            end
-        end)
-        if not loopOk then
-            warn("[Octoput Hub Webhook] Monitor error: " .. tostring(loopError))
-        end
-    end
-end)
-
-UserInputService.InputBegan:Connect(function(input, gameProcessed)
-    if not gameProcessed and input.KeyCode == Enum.KeyCode.RightShift then
-        MainFrame.Visible = not MainFrame.Visible
-    end
-end)
-
--- Hide only the hub window after every feature, connection and hotkey is initialized.
--- Automation continues running in the background; Right Shift reopens the GUI.
-if State.AutoHideGUIOnExecute then
-    MainFrame.Visible = false
-end
-
-print("XT Hub UI Loaded Successfully! Auto Play, Webhook & Misc are ready.")
+        
