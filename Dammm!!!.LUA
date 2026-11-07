@@ -14,6 +14,27 @@ else
 end
 
 -- [[ XT Hub Style GUI Script for Executor ]] --
+if type(table.clear) ~= "function" then
+    table.clear = function(t)
+        if type(t) == "table" then
+            for k in pairs(t) do
+                t[k] = nil
+            end
+        end
+        return t
+    end
+end
+
+if type(table.clone) ~= "function" then
+    table.clone = function(t)
+        if type(t) ~= "table" then return t end
+        local copy = {}
+        for k, v in pairs(t) do
+            copy[k] = type(v) == "table" and table.clone(v) or v
+        end
+        return copy
+    end
+end
 Players = game:GetService("Players")
 TweenService = game:GetService("TweenService")
 UserInputService = game:GetService("UserInputService")
@@ -5308,12 +5329,16 @@ CreateButton(WebhookPage, "Test Webhook", 4, function()
     local url = NormalizeWebhookUrl(State.WebhookURL)
     local problem = WebhookProblem(url)
     if problem then
-        WebhookStatus.Text = "Failed: " .. problem
-        WebhookStatus.TextColor3 = Color3.fromRGB(255, 120, 120)
+        if WebhookStatus then
+            WebhookStatus.Text = "Failed: " .. problem
+            WebhookStatus.TextColor3 = Color3.fromRGB(255, 120, 120)
+        end
         return
     end
-    WebhookStatus.Text = "Sending test message..."
-    WebhookStatus.TextColor3 = Color3.fromRGB(255, 200, 70)
+    if WebhookStatus then
+        WebhookStatus.Text = "Sending test message..."
+        WebhookStatus.TextColor3 = Color3.fromRGB(255, 200, 70)
+    end
     local body = HttpService:JSONEncode({
         username = "Octoput Hub",
         embeds = {{
@@ -5326,12 +5351,16 @@ CreateButton(WebhookPage, "Test Webhook", 4, function()
     local ok, result = pcall(HttpPost, url, body)
     local success, message = DescribeWebhookResult(ok, result)
     if success then
-        WebhookStatus.Text = "Success: " .. message
-        WebhookStatus.TextColor3 = Color3.fromRGB(100, 255, 140)
+        if WebhookStatus then
+            WebhookStatus.Text = "Success: " .. message
+            WebhookStatus.TextColor3 = Color3.fromRGB(100, 255, 140)
+        end
         print("[Octoput Hub Webhook Test] Success: " .. tostring(message))
     else
-        WebhookStatus.Text = "Failed: " .. message
-        WebhookStatus.TextColor3 = Color3.fromRGB(255, 120, 120)
+        if WebhookStatus then
+            WebhookStatus.Text = "Failed: " .. message
+            WebhookStatus.TextColor3 = Color3.fromRGB(255, 120, 120)
+        end
         warn("[Octoput Hub Webhook Test] Failed: " .. tostring(message))
     end
 end)
@@ -6026,7 +6055,7 @@ function SnipeBuildUnitList()
         SnipeMakeLabel(SnipeUnitList, "No unit IDs were found in this banner's data.", 1, 30, Color3.fromRGB(235, 170, 100))
     end
     local count = 0
-    for _, enabled in pairs(State.SnipeTargets) do if enabled then count += 1 end end
+    for _, enabled in pairs(State.SnipeTargets) do if enabled then count = count + 1 end end
     if SnipeTargetCountLabel then SnipeTargetCountLabel.Text = "Selected targets: " .. count end
 end
 
@@ -6105,7 +6134,7 @@ local function SnipeStart()
 
     local selectedBanner = State.SnipeBanner
     local targetCount = 0
-    for _, enabled in pairs(State.SnipeTargets) do if enabled then targetCount += 1 end end
+    for _, enabled in pairs(State.SnipeTargets) do if enabled then targetCount = targetCount + 1 end end
     if targetCount == 0 then SnipeSetStatus("Select at least one target unit", Color3.fromRGB(235, 100, 100)) return end
 
     local owned = SnipeFindOwnedUnits()
@@ -6197,7 +6226,7 @@ local function SnipeStart()
 
                 local batch = { done = 0, failed = nil }
                 for requestIndex = 1, batchSize do
-                    launchedSummons += 1
+                    launchedSummons = launchedSummons + 1
                     task.spawn(function()
                         local ok, result = pcall(function()
                             -- Match the game's BuyOne / BuyTen modes, dispatched
@@ -6207,7 +6236,7 @@ local function SnipeStart()
                         if not ok and not batch.failed then
                             batch.failed = tostring(result)
                         end
-                        batch.done += 1
+                        batch.done = batch.done + 1
                     end)
                 end
 
