@@ -2479,25 +2479,58 @@ function CountCategory(myUnits, pred)
     return n
 end
 
+function SafeCloneTable(tbl)
+    if type(tbl) ~= "table" then return tbl end
+    local ok, res = pcall(function()
+        if type(table.clone) == "function" then
+            return table.clone(tbl)
+        end
+    end)
+    if ok and type(res) == "table" then
+        return res
+    end
+    local copy = {}
+    for k, v in pairs(tbl) do
+        copy[k] = type(v) == "table" and SafeCloneTable(v) or v
+    end
+    return copy
+end
+
+local function ResolveHttpRequestFunction()
+    if type(syn) == "table" and type(syn.request) == "function" then return syn.request end
+    if type(http) == "table" and type(http.request) == "function" then return http.request end
+    if type(http_request) == "function" then return http_request end
+    if type(request) == "function" then return request end
+    if type(fluxus) == "table" and type(fluxus.request) == "function" then return fluxus.request end
+    if type(getgenv) == "function" then
+        local ok, g = pcall(getgenv)
+        if ok and type(g) == "table" then
+            if type(g.request) == "function" then return g.request end
+            if type(g.http_request) == "function" then return g.http_request end
+        end
+    end
+    return nil
+end
+
 function HttpPost(url, body)
-    local payload = {
-        Url = url,
-        url = url,
-        Method = "POST",
-        method = "POST",
-        Headers = { ["Content-Type"] = "application/json" },
-        headers = { ["Content-Type"] = "application/json" },
-        Body = body,
-        body = body,
-    }
-    local fn = (syn and syn.request)
-        or (http and http.request)
-        or http_request
-        or request
-        or (fluxus and fluxus.request)
-        or (getgenv and (getgenv().request or getgenv().http_request))
+    local fn = ResolveHttpRequestFunction()
     if fn then
-        return fn(payload)
+        local ok, res = pcall(fn, {
+            Url = url,
+            Method = "POST",
+            Headers = { ["Content-Type"] = "application/json" },
+            Body = body,
+        })
+        if ok and res ~= nil then return res end
+
+        local okLower, resLower = pcall(fn, {
+            url = url,
+            method = "POST",
+            headers = { ["Content-Type"] = "application/json" },
+            body = body,
+        })
+        if okLower and resLower ~= nil then return resLower end
+        if not ok then error(res or "HTTP request error") end
     end
     return HttpService:PostAsync(url, body, Enum.HttpContentType.ApplicationJson)
 end
@@ -3545,7 +3578,7 @@ webhookSecretRewardBaselineAvailable = false
 function CaptureWebhookCurrencyBaseline()
     webhookCurrencyBefore = ReadPlayerCurrencies()
     webhookSecretRewardBefore, webhookSecretRewardBaselineAvailable = ReadInventoryRewardSnapshot()
-    return table.clone(webhookCurrencyBefore), webhookSecretRewardBefore, webhookSecretRewardBaselineAvailable
+    return SafeCloneTable(webhookCurrencyBefore), webhookSecretRewardBefore, webhookSecretRewardBaselineAvailable
 end
 
 function ReadPlayerLevel()
@@ -4232,12 +4265,7 @@ function CreateTextBox(parent, title, placeholder, layoutOrder, onChanged, initi
 
     Input.FocusLost:Connect(function()
         if onChanged then
-            onChanged(Input.Text)
-        end
-    end)
-    Input:GetPropertyChangedSignal("Text"):Connect(function()
-        if onChanged then
-            onChanged(Input.Text)
+            pcall(onChanged, Input.Text)
         end
     end)
 
@@ -7049,7 +7077,7 @@ function StartWebhookEndSend(reason)
 
     webhookSending = true
     local sendToken = webhookMatchToken
-    local currencyBaseline = webhookCurrencyBefore and table.clone(webhookCurrencyBefore) or nil
+    local currencyBaseline = SafeCloneTable(webhookCurrencyBefore)
     local secretBaseline = webhookSecretRewardBefore
     local secretAvailable = webhookSecretRewardBaselineAvailable
     local unitLinesSnapshot = webhookUnitLinesSnapshot
@@ -7230,4 +7258,31 @@ task.spawn(function()
             end
 
             local hasEnded = finishedRising or (finished and webhookGameWasActive) or resultScreenConfirmed
-        
+            if hasEnded and not webhookEndDetected then
+                MarkWebhookEnd(resultTitle ~= "" and resultTitle or (finished and "GameFinished" or "ResultsUI"))
+            end
+
+            if webhookEndDetected and State.WebhookOnEnd and not webhookSent
+                and not webhookSending and os.clock() >= webhookRetryAt then
+                StartWebhookEndSend(finished and "GameFinished" or "ResultsUI")
+            end
+        end)
+        if not loopOk then
+            warn("[Octoput Hub Webhook] Monitor error: " .. tostring(loopError))
+        end
+    end
+end)
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if not gameProcessed and input.KeyCode == Enum.KeyCode.RightShift then
+        MainFrame.Visible = not MainFrame.Visible
+    end
+end)
+
+-- Hide only the hub window after every feature, connection and hotkey is initialized.
+-- Automation continues running in the background; Right Shift reopens the GUI.
+if State.AutoHideGUIOnExecute then
+    MainFrame.Visible = false
+end
+
+print("XT Hub UI Loaded Successfully! Auto Play, Webhook & Misc are ready.")
