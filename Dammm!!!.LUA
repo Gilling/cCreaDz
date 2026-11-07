@@ -14,6 +14,27 @@ else
 end
 
 -- [[ XT Hub Style GUI Script for Executor ]] --
+if type(table.clear) ~= "function" then
+    table.clear = function(t)
+        if type(t) == "table" then
+            for k in pairs(t) do
+                t[k] = nil
+            end
+        end
+        return t
+    end
+end
+
+if type(table.clone) ~= "function" then
+    table.clone = function(t)
+        if type(t) ~= "table" then return t end
+        local copy = {}
+        for k, v in pairs(t) do
+            copy[k] = type(v) == "table" and table.clone(v) or v
+        end
+        return copy
+    end
+end
 Players = game:GetService("Players")
 TweenService = game:GetService("TweenService")
 UserInputService = game:GetService("UserInputService")
@@ -32,7 +53,10 @@ ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "XT_Hub_UI"
 ScreenGui.ResetOnSpawn = false
 ScreenGui.IgnoreGuiInset = true
-ScreenGui.DisplayOrder = 120
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Global
+-- Keep the hub above game HUDs such as Player Stats, even if they use a
+-- higher DisplayOrder or are recreated while BlackScreen is active.
+ScreenGui.DisplayOrder = 10000
 ScreenGui.Parent = playerGui
 
 BlackOverlay = Instance.new("Frame")
@@ -53,8 +77,23 @@ MainFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
 MainFrame.BorderSizePixel = 0
 MainFrame.Active = true
 MainFrame.Draggable = true
-MainFrame.ZIndex = 10
+-- Keep the complete control window above the BlackScreen Live Match panel.
+-- Use Global ZIndex and lift every child together so nested controls stay visible.
+MainFrame.ZIndex = 300
 MainFrame.Parent = ScreenGui
+
+local function LiftHubGuiObject(guiObject)
+    if guiObject and guiObject:IsA("GuiObject") and guiObject ~= MainFrame then
+        guiObject.ZIndex = math.max(guiObject.ZIndex, 1) + 300
+    end
+end
+
+for _, descendant in ipairs(MainFrame:GetDescendants()) do
+    LiftHubGuiObject(descendant)
+end
+MainFrame.DescendantAdded:Connect(function(descendant)
+    LiftHubGuiObject(descendant)
+end)
 
 HubScale = Instance.new("UIScale")
 HubScale.Name = "HubScale"
@@ -158,7 +197,7 @@ MatchInfoPanel.BackgroundColor3 = Color3.fromRGB(12, 15, 24)
 MatchInfoPanel.BackgroundTransparency = 0.08
 MatchInfoPanel.BorderSizePixel = 0
 MatchInfoPanel.Visible = false
-MatchInfoPanel.ZIndex = 180
+MatchInfoPanel.ZIndex = 2
 MatchInfoPanel.Parent = ScreenGui
 MatchPanelCorner = Instance.new("UICorner")
 MatchPanelCorner.CornerRadius = UDim.new(0, 18)
@@ -177,7 +216,7 @@ PromoLogo.BackgroundColor3 = Color3.fromRGB(25, 29, 43)
 PromoLogo.BackgroundTransparency = 0.05
 PromoLogo.BorderSizePixel = 0
 PromoLogo.ScaleType = Enum.ScaleType.Fit
-PromoLogo.ZIndex = 181
+PromoLogo.ZIndex = 3
 PromoLogo.Parent = MatchInfoPanel
 PromoLogoCorner = Instance.new("UICorner")
 PromoLogoCorner.CornerRadius = UDim.new(0, 14)
@@ -189,7 +228,7 @@ PromoLogoFallback.Text = "OCTOPUT HUB"
 PromoLogoFallback.TextColor3 = Color3.new(1, 1, 1)
 PromoLogoFallback.Font = Enum.Font.GothamBlack
 PromoLogoFallback.TextSize = 12
-PromoLogoFallback.ZIndex = 182
+PromoLogoFallback.ZIndex = 4
 PromoLogoFallback.Parent = PromoLogo
 
 function MakeMatchLabel(name, position, size, text, textSize, color, font)
@@ -205,7 +244,7 @@ function MakeMatchLabel(name, position, size, text, textSize, color, font)
     label.TextXAlignment = Enum.TextXAlignment.Left
     label.TextYAlignment = Enum.TextYAlignment.Center
     label.TextTruncate = Enum.TextTruncate.AtEnd
-    label.ZIndex = 181
+    label.ZIndex = 3
     label.Parent = MatchInfoPanel
     return label
 end
@@ -434,10 +473,12 @@ State = {
     AutoPlace = false,
     AutoUpgrade = false,
     AutoUpgradeFarmFirst = true,
+    AutoBuffRotation = false,
     InfinityBuff = false,
     InfinityBuffElfy = true,
     InfinityBuffCommander = true,
     InfinityBuffWindsong = true,
+    InfinityBuffHybrid = true,
     PlacePercent = 0,
     PlaceRangeMin = 0,
     PlaceRangeMax = 100,
@@ -462,6 +503,7 @@ State = {
     AutoLeave = false,
     AntiAFK = true,
     AutoOpenPortal = false,
+    AutoNextPortal = false,
     SelectedPortalTypes = {},
     SelectedPortalTiers = {},
     SnipeBanner = "",
@@ -567,10 +609,12 @@ function CopyStateForSave()
         AutoPlace = State.AutoPlace,
         AutoUpgrade = State.AutoUpgrade,
         AutoUpgradeFarmFirst = State.AutoUpgradeFarmFirst,
-        InfinityBuff = State.InfinityBuff,
+        AutoBuffRotation = State.AutoBuffRotation or State.InfinityBuff,
+        InfinityBuff = State.InfinityBuff or State.AutoBuffRotation,
         InfinityBuffElfy = State.InfinityBuffElfy,
         InfinityBuffCommander = State.InfinityBuffCommander,
         InfinityBuffWindsong = State.InfinityBuffWindsong,
+        InfinityBuffHybrid = State.InfinityBuffHybrid,
         PlacePercent = State.PlacePercent,
         AutoFindMatch = State.AutoFindMatch,
         AutoEventQuests = State.AutoEventQuests,
@@ -593,6 +637,7 @@ function CopyStateForSave()
         AutoLeave = State.AutoLeave,
         AntiAFK = State.AntiAFK,
         AutoOpenPortal = State.AutoOpenPortal,
+        AutoNextPortal = State.AutoNextPortal,
         SelectedPortalTypes = State.SelectedPortalTypes,
         SelectedPortalTiers = State.SelectedPortalTiers,
         SnipeBanner = State.SnipeBanner,
@@ -626,8 +671,8 @@ function ApplySavedTable(saved)
         return
     end
     local boolKeys = {
-        "AutoPlace", "AutoUpgrade", "AutoUpgradeFarmFirst",
-        "InfinityBuff", "InfinityBuffElfy", "InfinityBuffCommander", "InfinityBuffWindsong",
+        "AutoPlace", "AutoUpgrade", "AutoUpgradeFarmFirst", "AutoBuffRotation",
+        "InfinityBuff", "InfinityBuffElfy", "InfinityBuffCommander", "InfinityBuffWindsong", "InfinityBuffHybrid",
         "AutoFindMatch", "AutoEventQuests", "AutoPickCards", "AutoReplay", "WebhookOnEnd", "BlackScreen", "AutoHideGUIOnExecute",
         "PlaceHybridGround", "PlaceHybridHill", "AutoStart", "MainAutoReplay", "AutoNext", "AutoLeave", "AntiAFK",
     }
@@ -635,6 +680,11 @@ function ApplySavedTable(saved)
         if type(saved[key]) == "boolean" then
             State[key] = saved[key]
         end
+    end
+    if State.InfinityBuff ~= nil then
+        State.AutoBuffRotation = State.InfinityBuff
+    elseif State.AutoBuffRotation ~= nil then
+        State.InfinityBuff = State.AutoBuffRotation
     end
     if type(saved.PlacePercent) == "number" then
         State.PlacePercent = math.clamp(saved.PlacePercent, 0, 100)
@@ -655,6 +705,9 @@ function ApplySavedTable(saved)
     end
     if type(saved.AutoOpenPortal) == "boolean" then
         State.AutoOpenPortal = saved.AutoOpenPortal
+    end
+    if type(saved.AutoNextPortal) == "boolean" then
+        State.AutoNextPortal = saved.AutoNextPortal
     end
     if type(saved.SelectedPortalTypes) == "table" then
         local selected = {}
@@ -742,7 +795,38 @@ function LoadConfig()
 end
 
 LoadConfig()
-HubScale.Scale = State.UIScale
+
+-- Keep the hub inside the available screen area at large UI scales.
+-- The user's selected scale remains saved; only the effective display scale is clamped.
+function ApplyHubScale()
+    local effectiveScale = State.UIScale
+    local camera = workspace.CurrentCamera
+    if camera then
+        local viewport = camera.ViewportSize
+        local widthLimit = math.max(0.5, (viewport.X - 24) / 780)
+        local heightLimit = math.max(0.5, (viewport.Y - 24) / 480)
+        effectiveScale = math.min(effectiveScale, widthLimit, heightLimit)
+    end
+    HubScale.Scale = effectiveScale
+    if type(ApplyResponsiveGuiSizing) == "function" then
+        ApplyResponsiveGuiSizing()
+    end
+end
+
+local viewportConnection = nil
+local function BindViewportScale()
+    if viewportConnection then
+        viewportConnection:Disconnect()
+        viewportConnection = nil
+    end
+    local camera = workspace.CurrentCamera
+    if camera then
+        viewportConnection = camera:GetPropertyChangedSignal("ViewportSize"):Connect(ApplyHubScale)
+    end
+    ApplyHubScale()
+end
+workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(BindViewportScale)
+BindViewportScale()
 
 EVENT_LEVEL_ID = "summer2_event"
 
@@ -820,8 +904,102 @@ function IsFarmName(text)
         or id:find("weather", 1, true)) ~= nil
 end
 
+ReplicatedGameDataSyncedJobId = nil
+ReplicatedGameDataSyncing = false
+ReplicatedGameDataLastAttempt = 0
+
+function SyncReplicatedGameData()
+    if IsInLobby() then
+        return
+    end
+    local jobId = tostring(game.JobId or "")
+    if ReplicatedGameDataSyncedJobId == jobId
+        and type(UnitsDataCache) == "table"
+        and type(UnitsDataCache["leafa_evolved"]) == "table"
+        and type(UnitsDataCache["leafa_evolved"].upgrade) == "table" then
+        return
+    end
+    local now = tick()
+    if ReplicatedGameDataSyncing or (now - ReplicatedGameDataLastAttempt) < 4 then
+        return
+    end
+    ReplicatedGameDataLastAttempt = now
+    ReplicatedGameDataSyncing = true
+
+    task.spawn(function()
+        pcall(function()
+            local Loader = require(ReplicatedStorage.src.Loader)
+            local loaderUnits = Loader.load_data(game, "Units")
+            local loaderAttacks = Loader.load_data(game, "Attacks")
+            if type(loaderUnits) == "table" then
+                UnitsDataCache = UnitsDataCache or loaderUnits
+                for k, v in pairs(loaderUnits) do
+                    if type(v) == "table" then
+                        UnitsDataCache[k] = v
+                    end
+                end
+            end
+            if type(loaderAttacks) == "table" then
+                AttacksDataCache = AttacksDataCache or loaderAttacks
+                for k, v in pairs(loaderAttacks) do
+                    if type(v) == "table" then
+                        AttacksDataCache[k] = v
+                    end
+                end
+            end
+
+            if type(UnitsDataCache) == "table"
+                and type(UnitsDataCache["leafa_evolved"]) == "table"
+                and type(UnitsDataCache["leafa_evolved"].upgrade) == "table" then
+                ReplicatedGameDataSyncedJobId = jobId
+                return
+            end
+
+            local rep = InvokeEndpoint("get_unit_game_replicator_data")
+            if type(rep) == "table" then
+                if type(rep.units) == "table" then
+                    UnitsDataCache = UnitsDataCache or {}
+                    for unitId, unitDef in pairs(rep.units) do
+                        if type(unitDef) == "table" then
+                            unitDef.id = unitDef.id or unitId
+                            UnitsDataCache[unitId] = unitDef
+                            if type(loaderUnits) == "table" then
+                                loaderUnits[unitId] = unitDef
+                            end
+                        end
+                    end
+                end
+                if type(rep.attacks) == "table" then
+                    AttacksDataCache = AttacksDataCache or {}
+                    for attackId, attackDef in pairs(rep.attacks) do
+                        if type(attackDef) == "table" then
+                            AttacksDataCache[attackId] = attackDef
+                            if type(loaderAttacks) == "table" then
+                                loaderAttacks[attackId] = attackDef
+                            end
+                        end
+                    end
+                end
+                ReplicatedGameDataSyncedJobId = jobId
+            end
+        end)
+        ReplicatedGameDataSyncing = false
+    end)
+end
+
 function GetUnitsData()
-    if UnitsDataCache then
+    if not IsInLobby() then
+        SyncReplicatedGameData()
+    end
+    if UnitsDataCache and next(UnitsDataCache) ~= nil then
+        return UnitsDataCache
+    end
+    local okLoader, loaderData = pcall(function()
+        local Loader = require(ReplicatedStorage.src.Loader)
+        return Loader.load_data(game, "Units")
+    end)
+    if okLoader and type(loaderData) == "table" and next(loaderData) ~= nil then
+        UnitsDataCache = loaderData
         return UnitsDataCache
     end
     local ok, data = pcall(function()
@@ -918,27 +1096,446 @@ function IsFarmUnit(unit)
 
     return false
 end
+function GetEquippedUnitList()
+    local unitsList = {}
+
+    -- Unit Configuration must read ONLY the six actual equipped slots (1-6).
+    -- Do not merge GUI leftovers or previously saved UnitConfigs into this list.
+    local ok, err = pcall(function()
+        local Loader = require(ReplicatedStorage.src.Loader)
+        local ucs = Loader.load_client_service(game, "UnitCollectionServiceClient")
+        if not ucs or type(ucs.get_equipped_units) ~= "function" then
+            return
+        end
+
+        local equipped = ucs.get_equipped_units()
+        if type(equipped) ~= "table" then
+            return
+        end
+
+        for slot = 1, 6 do
+            local slotKey = tostring(slot)
+            local uuid = equipped[slotKey]
+            if uuid == nil then
+                uuid = equipped[slot]
+            end
+
+            if uuid ~= nil then
+                local item = nil
+                if type(ucs.get_equipped_unit_by_uuid) == "function" then
+                    item = ucs.get_equipped_unit_by_uuid(uuid)
+                end
+
+                local unitId = type(item) == "table"
+                    and (item.unit_id or item.unitId or item.id)
+                    or nil
+                local data = unitId and LookupUnitData(unitId) or nil
+                local displayName = type(item) == "table"
+                    and (item.name or item.display_name or item.displayName)
+                    or nil
+
+                if (not displayName or displayName == "") and type(data) == "table" then
+                    displayName = data.name
+                end
+
+                table.insert(unitsList, {
+                    uuid = uuid,
+                    cost = type(data) == "table" and tonumber(data.cost) or 0,
+                    name = displayName or unitId or "Unit",
+                    unitId = unitId,
+                    slot = slotKey,
+                })
+            end
+        end
+    end)
+
+    if not ok then
+        warn("[OctoputHub] Could not read equipped slots 1-6: " .. tostring(err))
+    end
+
+    return unitsList
+end
+
+function EnrichEquipped(list)
+    for _, info in ipairs(list) do
+        local unitId = info.unitId
+        pcall(function()
+            if info.uuid then
+                local Loader = require(ReplicatedStorage.src.Loader)
+                local ucs = Loader.load_client_service(game, "UnitCollectionServiceClient")
+                if ucs and ucs.get_equipped_unit_by_uuid then
+                    local owned = ucs.get_equipped_unit_by_uuid(info.uuid)
+                    if owned then
+                        unitId = owned.unit_id or owned.unitId or owned.id or unitId
+                    end
+                end
+            end
+        end)
+        if not unitId then
+            local _, foundId = LookupUnitData(info.name)
+            unitId = foundId or info.name
+        end
+        info.unitId = tostring(unitId or info.name or "unit")
+        local data = LookupUnitData(info.unitId)
+        if data then
+            if type(data.name) == "string" and data.name ~= "" then
+                info.name = data.name
+            end
+            info.spawnCap = tonumber(data.spawn_cap)
+            info.globalSpawnCap = tonumber(data.global_spawn_cap)
+            info.maxUpgrade = type(data.upgrade) == "table" and #data.upgrade or nil
+            info.hybrid = data.hybrid_placement == true
+            info.hill = data.hill_unit == true
+        end
+        if info.name and info.name ~= "" and info.name ~= "Unit" then
+            State.UnitNames[info.unitId] = info.name
+        end
+    end
+    return list
+end
+
+-- Auto Buff Rotation: read the deployed unit's live active cooldown and its
+-- matching owned-unit Curse data. Game.lua applies Curse cooldown modifiers
+-- through further_modifiers.cursed and exposes the effective cooldown in
+-- _stats.active_attack_cooldown on the deployed model.
+--
+-- Buff loop formula (game.lua):
+--   active cooldown  C = active_attack_stats.attack_cooldown (60s for Commander/Windsong)
+--                        * calculate_static_stat_multiplier(unit, xp, "active_attack_cooldown")
+--                      = base * max(0.6, (1 + cursed attack_cooldown mods) * level/artifact mods)
+--   buff duration    D = aoe[*].hit.buffs[*].time (30s for Commander/Windsong)
+--   unit SPD         = 1 / C (casts per second); group rate R = sum(1 / C_i)
+--   loop is seamless when R >= 1 / D, i.e. units needed = ceil(C / D)
+-- The worker recasts one unit only when the group's current buff is about to
+-- expire (lastGroupCast + D - lead), so casts are staggered instead of all
+-- units firing together and leaving a gap afterwards.
+BUFF_ROTATION_ATTACKS = {
+    ["erwin:buff_units"] = { name = "Commander", duration = 30, buff = "Physical", unit = "commander", baseCooldown = 60 },
+    ["wendy:buff_units"] = { name = "Windsong", duration = 30, buff = "Magic", unit = "windsong", baseCooldown = 60 },
+}
+BUFF_ROTATION_ELFY_DEFAULT = { name = "Elfy (Sylph) - Verdant Enchantment", duration = 30, buff = "Magic", unit = "elfy", baseCooldown = 60 }
+BUFF_ROTATION_RUNTIME = { groups = {}, requestBusy = false, requestStarted = 0, ownCast = {} }
+BUFF_ROTATION_CURSE_CACHE = {}
+BUFF_ROTATION_MULT_CACHE = {}
+BUFF_ROTATION_MIN_REQUEST_GAP = 0.5
+BUFF_ROTATION_PENDING_TIMEOUT = 4.5
+BUFF_ROTATION_SAFETY_MARGIN = 0.75
+BUFF_ROTATION_REQUEST_TIMEOUT = 8
+BUFF_ROTATION_DEFAULT_ACTIVE_COOLDOWN = 60
+
+function GetOwnedUnitRecordForPlacedUnit(unit)
+    if not unit or not unit:FindFirstChild("_stats") then return nil end
+    local uuidValue = unit._stats:FindFirstChild("uuid")
+    if not uuidValue then return nil end
+    local uuid = tostring(uuidValue.Value or "")
+    if uuid == "" then return nil end
+
+    local ok, owned = pcall(function()
+        local Loader = require(ReplicatedStorage.src.Loader)
+        local ucs = Loader.load_client_service(game, "UnitCollectionServiceClient")
+        if ucs and type(ucs.get_equipped_unit_by_uuid) == "function" then
+            return ucs.get_equipped_unit_by_uuid(uuid)
+        end
+    end)
+    if ok and type(owned) == "table" then return owned end
+    return nil
+end
+
+function GetUnitCurseCooldownInfo(unit)
+    local stats = unit and unit:FindFirstChild("_stats")
+    local uuidValue = stats and stats:FindFirstChild("uuid")
+    local uuid = uuidValue and tostring(uuidValue.Value or "") or ""
+    if uuid ~= "" then
+        local cached = BUFF_ROTATION_CURSE_CACHE[uuid]
+        if cached and tick() - cached.time < 5 then
+            return cached.hasCurse, cached.reduction, cached.known, cached.factor
+        end
+    end
+
+    local owned = GetOwnedUnitRecordForPlacedUnit(unit)
+    if type(owned) ~= "table" then
+        if uuid ~= "" then
+            BUFF_ROTATION_CURSE_CACHE[uuid] = { time = tick(), hasCurse = false, reduction = 0, known = false, factor = 1 }
+        end
+        return false, 0, false, 1
+    end
+
+    local cursed = type(owned.further_modifiers) == "table" and owned.further_modifiers.cursed or nil
+    if type(cursed) ~= "table" then
+        if uuid ~= "" then
+            BUFF_ROTATION_CURSE_CACHE[uuid] = { time = tick(), hasCurse = false, reduction = 0, known = true, factor = 1 }
+        end
+        return false, 0, true, 1
+    end
+
+    -- game.lua calculate_static_stat_multiplier() strips the "active_" prefix,
+    -- then sums BOTH cursed.positive_buff and cursed.negative_buff for
+    -- stat_id == "attack_cooldown". Keep positive and negative modifiers.
+    local modifierSum = 0
+    local hasCooldownModifier = false
+    for _, key in ipairs({ "positive_buff", "negative_buff" }) do
+        local mod = cursed[key]
+        if type(mod) == "table" and mod.stat_id == "attack_cooldown" and tonumber(mod.stat_mod) then
+            modifierSum = modifierSum + tonumber(mod.stat_mod)
+            hasCooldownModifier = true
+        end
+    end
+    local factor = math.max(0.0001, 1 + modifierSum)
+    if uuid ~= "" then
+        BUFF_ROTATION_CURSE_CACHE[uuid] = {
+            time = tick(), hasCurse = hasCooldownModifier, reduction = modifierSum,
+            known = true, factor = factor
+        }
+    end
+    return hasCooldownModifier, modifierSum, true, factor
+end
+
+function GetAttacksData()
+    if not IsInLobby() then
+        SyncReplicatedGameData()
+    end
+    if AttacksDataCache and next(AttacksDataCache) ~= nil then
+        return AttacksDataCache
+    end
+    local okLoader, loaderData = pcall(function()
+        local Loader = require(ReplicatedStorage.src.Loader)
+        return Loader.load_data(game, "Attacks")
+    end)
+    if okLoader and type(loaderData) == "table" and next(loaderData) ~= nil then
+        AttacksDataCache = loaderData
+        return AttacksDataCache
+    end
+    local ok, data = pcall(function()
+        return require(ReplicatedStorage.src.Data.Attacks)
+    end)
+    if ok and type(data) == "table" then
+        AttacksDataCache = data
+        return AttacksDataCache
+    end
+    return {}
+end
+
+-- Read the buff time from Attacks[attackId].aoe[*].hit.buffs[*].time
+-- (erwin:buff_units / wendy:buff_units = 30s). Works for Elfy's runtime
+-- Verdant Enchantment as well, because the live Attacks module contains it.
+function GetAttackBuffDuration(attackId, fallback)
+    local attack = attackId and GetAttacksData()[attackId] or nil
+    local best = nil
+    local function scanHit(hit)
+        if type(hit) ~= "table" or type(hit.buffs) ~= "table" then return end
+        for _, buff in pairs(hit.buffs) do
+            local t = type(buff) == "table" and tonumber(buff.time) or nil
+            if t and t > 0 and (not best or t > best) then
+                best = t
+            end
+        end
+    end
+    if type(attack) == "table" then
+        scanHit(attack.hit)
+        if type(attack.hit) == "table" then
+            for _, hit in pairs(attack.hit) do
+                if type(hit) == "table" then scanHit(hit) end
+            end
+        end
+        if type(attack.aoe) == "table" then
+            for _, entry in pairs(attack.aoe) do
+                if type(entry) == "table" then scanHit(entry.hit) end
+            end
+        end
+    end
+    return best or fallback or 30
+end
+
+function GetAttackDisplayName(attackId, fallback)
+    local attack = attackId and GetAttacksData()[attackId] or nil
+    if type(attack) == "table" and type(attack.name) == "string" and attack.name ~= "" then
+        return attack.name
+    end
+    return fallback
+end
+
+-- Mirrors UnitServiceCore.get_active_stats_used(): unit active_attack_stats
+-- first, otherwise the first upgrade that defines active_attack_stats.
+function GetUnitActiveBaseCooldown(unitData, upgradeLevel)
+    if type(unitData) ~= "table" then return nil end
+    local stats = unitData.active_attack_stats
+    if type(stats) == "table" and tonumber(stats.attack_cooldown) then
+        return tonumber(stats.attack_cooldown)
+    end
+    if type(unitData.upgrade) == "table" then
+        local lvl = math.min(tonumber(upgradeLevel) or #unitData.upgrade, #unitData.upgrade)
+        local found = nil
+        for i = 1, lvl do
+            local upg = unitData.upgrade[i]
+            if type(upg) == "table" and type(upg.active_attack_stats) == "table"
+                and tonumber(upg.active_attack_stats.attack_cooldown) then
+                found = tonumber(upg.active_attack_stats.attack_cooldown)
+            end
+        end
+        if found then return found end
+        for _, upg in pairs(unitData.upgrade) do
+            if type(upg) == "table" and type(upg.active_attack_stats) == "table"
+                and tonumber(upg.active_attack_stats.attack_cooldown) then
+                return tonumber(upg.active_attack_stats.attack_cooldown)
+            end
+        end
+    end
+    return nil
+end
+
+-- Active cooldown multiplier exactly as game.lua computes it:
+-- UnitServiceCore.calculate_static_stat_multiplier(unit, xp, "active_attack_cooldown").
+-- For "active_" stats the game strips the prefix, skips trait multipliers, adds
+-- cursed positive_buff + negative_buff attack_cooldown mods, applies level /
+-- artifact modifiers and clamps the result to >= 0.6.
+-- Fallback when the core service is unavailable: max(0.6, 1 + curseSum).
+function GetActiveCooldownMultiplier(unit, curseSum)
+    local stats = unit and unit:FindFirstChild("_stats")
+    local uuidValue = stats and stats:FindFirstChild("uuid")
+    local uuid = uuidValue and tostring(uuidValue.Value or "") or ""
+    if uuid ~= "" then
+        local cached = BUFF_ROTATION_MULT_CACHE[uuid]
+        if cached and tick() - cached.time < 5 then
+            return cached.mult, cached.source, cached.speedStat
+        end
+    end
+
+    local owned = GetOwnedUnitRecordForPlacedUnit(unit)
+    local mult, source = nil, "curse"
+    local speedStat = nil
+    if type(owned) == "table" then
+        if type(owned.trait_stats) == "table" then
+            speedStat = tonumber(owned.trait_stats.speed_stat)
+        end
+        local ok, value = pcall(function()
+            local Loader = require(ReplicatedStorage.src.Loader)
+            local core = Loader.load_core_service(game, "UnitServiceCore")
+            if core and type(core.calculate_static_stat_multiplier) == "function" then
+                return core.calculate_static_stat_multiplier(owned, owned.xp or 0, "active_attack_cooldown", nil)
+            end
+        end)
+        if ok and tonumber(value) and tonumber(value) > 0 then
+            mult = tonumber(value)
+            source = "game"
+        end
+    end
+    if not mult then
+        mult = math.max(0.6, 1 + (tonumber(curseSum) or 0))
+    end
+    if not speedStat and unit then
+        speedStat = tonumber(unit:GetAttribute("speed_stat"))
+    end
+    if uuid ~= "" then
+        BUFF_ROTATION_MULT_CACHE[uuid] = { time = tick(), mult = mult, source = source, speedStat = speedStat }
+    end
+    return mult, source, speedStat
+end
+
+BUFF_ROTATION_ATTACKS_REPLICATE = nil
+function GetAttacksReplicateService()
+    if BUFF_ROTATION_ATTACKS_REPLICATE then
+        return BUFF_ROTATION_ATTACKS_REPLICATE
+    end
+    local ok, service = pcall(function()
+        local Loader = require(ReplicatedStorage.src.Loader)
+        return Loader.load_client_service(game, "AttacksReplicate")
+    end)
+    if ok and type(service) == "table" then
+        BUFF_ROTATION_ATTACKS_REPLICATE = service
+        return service
+    end
+    return nil
+end
+
+function GetUnitOverheadReadyAttribute(unit)
+    if not unit then return nil end
+    local ok, readyAttr = pcall(function()
+        local hrp = unit:FindFirstChild("HumanoidRootPart")
+        local overFrame = hrp and hrp:FindFirstChild("OverFrame")
+        local activeCd = overFrame and overFrame:FindFirstChild("ActiveCooldown")
+        local bar = activeCd and activeCd:FindFirstChild("Bar")
+        local stroke = bar and bar:FindFirstChild("UIStroke")
+        if stroke then
+            return stroke:GetAttribute("_ready")
+        end
+        return nil
+    end)
+    if ok then return readyAttr end
+    return nil
+end
+
+function GetActiveAttackCooldownState(entry, now)
+    -- Mirror game.lua AttacksReplicate.get_current_active_attack_cooldown():
+    -- busy while _stats.active_queued_or_using is true, otherwise ready when
+    -- active_attack_cooldown - (tick() - last_active_cast) <= 0.
+    if entry.queued then
+        return true, false, entry.cooldown, entry.cooldown
+    end
+    local remaining = entry.cooldown - (now - entry.lastCast)
+    local isReady = remaining <= 0
+    if isReady and entry.lastCast <= 0 then
+        local overheadReady = GetUnitOverheadReadyAttribute(entry.model)
+        if overheadReady == false then
+            isReady = false
+            remaining = math.max(remaining, 1)
+        end
+    end
+    return false, isReady, entry.cooldown, math.max(0, remaining)
+end
+
+function IsElfySylphUnit(rawId, unitData, unit)
+    for _, value in ipairs({ rawId, unitData and unitData.id, unit and unit.Name }) do
+        local id = NormalizeName(value)
+        if id == "leafaevolved"
+            or (id:find("leafa", 1, true) and id:find("evolved", 1, true))
+            or id:find("sylph", 1, true) then
+            return true
+        end
+    end
+    -- NormalizeName keeps parentheses, so "Elfy (Sylph)" -> "elfy(sylph)".
+    local name = NormalizeName(unitData and unitData.name)
+    if name:find("sylph", 1, true) then
+        return true
+    end
+    if type(unitData) == "table" and type(unitData.evolved) == "table" and unitData.evolved.from == "leafa" then
+        return true
+    end
+    return false
+end
+
+function IsElfyFamilyUnit(rawId, unitData, unit)
+    if IsElfySylphUnit(rawId, unitData, unit) then return true end
+    local id = NormalizeName(rawId)
+    local unitName = NormalizeName(unit and unit.Name)
+    local name = NormalizeName(unitData and unitData.name)
+    return id:find("leafa", 1, true) ~= nil
+        or id:find("elfy", 1, true) ~= nil
+        or unitName:find("leafa", 1, true) ~= nil
+        or unitName:find("elfy", 1, true) ~= nil
+        or name:find("elfy", 1, true) ~= nil
+end
 
 function IsElfyUnit(unit)
     if not unit or not unit.Parent or not unit:FindFirstChild("_stats") then
         return false
     end
-    local rawId = GetRawUnitId(unit):lower()
+    local rawId = GetRawUnitId(unit)
+    local unitData = LookupUnitData(rawId)
+    if IsElfySylphUnit(rawId, unitData, unit) or IsElfyFamilyUnit(rawId, unitData, unit) then
+        return true
+    end
     local unitId = GetUnitId(unit):lower()
     local name = NormalizeName(unit.Name)
     local stats = unit._stats
     local statName = stats:FindFirstChild("name") or stats:FindFirstChild("unit_name")
     local valName = statName and NormalizeName(statName.Value) or ""
-
-    if rawId:find("leafa", 1, true) or unitId:find("leafa", 1, true)
+    if rawId:lower():find("leafa", 1, true) or unitId:find("leafa", 1, true)
         or name:find("elfy", 1, true) or name:find("sylph", 1, true)
         or valName:find("elfy", 1, true) or valName:find("sylph", 1, true) then
         return true
     end
-
-    local data = LookupUnitData(rawId) or LookupUnitData(unitId)
-    if type(data) == "table" and type(data.name) == "string" then
-        local dName = NormalizeName(data.name)
+    if type(unitData) == "table" and type(unitData.name) == "string" then
+        local dName = NormalizeName(unitData.name)
         if dName:find("elfy", 1, true) or dName:find("sylph", 1, true) or dName:find("leafa", 1, true) then
             return true
         end
@@ -1000,6 +1597,35 @@ function IsWindsongUnit(unit)
     return false
 end
 
+function IsGenericBufferUnit(unit)
+    if not unit or not unit.Parent or not unit:FindFirstChild("_stats") then
+        return false
+    end
+    if IsElfyUnit(unit) or IsCommanderUnit(unit) or IsWindsongUnit(unit) then
+        return false
+    end
+    local rawId = GetRawUnitId(unit)
+    local data = LookupUnitData(rawId)
+    if type(data) == "table" and (data._show_as_buff_unit == true or data._placement_highlight_buffed_units == true) then
+        return true
+    end
+    local stats = unit._stats
+    local active = stats:FindFirstChild("active_attack")
+    if active and tostring(active.Value):lower():find("buff", 1, true) then
+        return true
+    end
+    local multi = stats:FindFirstChild("buff_damage_multiplier")
+    if multi and tonumber(multi.Value) and tonumber(multi.Value) > 1 then
+        return true
+    end
+    local physAttr = stats:GetAttribute("_dmg_buff_physical")
+    local magicAttr = stats:GetAttribute("_dmg_buff_magic")
+    if (tonumber(physAttr) or 0) > 0 or (tonumber(magicAttr) or 0) > 0 then
+        return true
+    end
+    return false
+end
+
 function IsBufferUnit(unit)
     if IsElfyUnit(unit) then
         return true, "elfy"
@@ -1007,11 +1633,8 @@ function IsBufferUnit(unit)
         return true, "commander"
     elseif IsWindsongUnit(unit) then
         return true, "windsong"
-    end
-    local stats = unit and unit:FindFirstChild("_stats")
-    local active = stats and stats:FindFirstChild("active_attack")
-    if active and tostring(active.Value):find("buff", 1, true) then
-        return true, "generic"
+    elseif IsGenericBufferUnit(unit) then
+        return true, "hybrid"
     end
     return false, nil
 end
@@ -1118,102 +1741,280 @@ function IsBuffTypeActiveOnUnits(playerUnits, damageType)
     return anyActive, maxBuff
 end
 
-function GetEquippedUnitList()
-    local unitsList = {}
-
-    -- Unit Configuration must read ONLY the six actual equipped slots (1-6).
-    -- Do not merge GUI leftovers or previously saved UnitConfigs into this list.
-    local ok, err = pcall(function()
-        local Loader = require(ReplicatedStorage.src.Loader)
-        local ucs = Loader.load_client_service(game, "UnitCollectionServiceClient")
-        if not ucs or type(ucs.get_equipped_units) ~= "function" then
-            return
-        end
-
-        local equipped = ucs.get_equipped_units()
-        if type(equipped) ~= "table" then
-            return
-        end
-
-        for slot = 1, 6 do
-            local slotKey = tostring(slot)
-            local uuid = equipped[slotKey]
-            if uuid == nil then
-                uuid = equipped[slot]
-            end
-
-            if uuid ~= nil then
-                local item = nil
-                if type(ucs.get_equipped_unit_by_uuid) == "function" then
-                    item = ucs.get_equipped_unit_by_uuid(uuid)
+function AreUnitsInRange(units)
+    if #units < 2 then return true end
+    for i = 1, #units - 1 do
+        for j = i + 1, #units do
+            local statsA = units[i]:FindFirstChild("_stats")
+            local statsB = units[j]:FindFirstChild("_stats")
+            local rA = (statsA and statsA:FindFirstChild("range") and tonumber(statsA.range.Value)) or 25
+            local rB = (statsB and statsB:FindFirstChild("range") and tonumber(statsB.range.Value)) or 25
+            local maxRange = math.max(rA, rB, 25) + 5
+            local partA = units[i]:FindFirstChild("HumanoidRootPart") or units[i].PrimaryPart or units[i]:FindFirstChildWhichIsA("BasePart")
+            local partB = units[j]:FindFirstChild("HumanoidRootPart") or units[j].PrimaryPart or units[j]:FindFirstChildWhichIsA("BasePart")
+            if partA and partB then
+                local dist2D = Vector2.new(partA.Position.X - partB.Position.X, partA.Position.Z - partB.Position.Z).Magnitude
+                if dist2D > maxRange then
+                    return false
                 end
-
-                local unitId = type(item) == "table"
-                    and (item.unit_id or item.unitId or item.id)
-                    or nil
-                local data = unitId and LookupUnitData(unitId) or nil
-                local displayName = type(item) == "table"
-                    and (item.name or item.display_name or item.displayName)
-                    or nil
-
-                if (not displayName or displayName == "") and type(data) == "table" then
-                    displayName = data.name
-                end
-
-                table.insert(unitsList, {
-                    uuid = uuid,
-                    cost = type(data) == "table" and tonumber(data.cost) or 0,
-                    name = displayName or unitId or "Unit",
-                    unitId = unitId,
-                    slot = slotKey,
-                })
             end
         end
-    end)
-
-    if not ok then
-        warn("[OctoputHub] Could not read equipped slots 1-6: " .. tostring(err))
     end
-
-    return unitsList
+    return true
 end
 
-function EnrichEquipped(list)
-    for _, info in ipairs(list) do
-        local unitId = info.unitId
-        pcall(function()
-            if info.uuid then
-                local Loader = require(ReplicatedStorage.src.Loader)
-                local ucs = Loader.load_client_service(game, "UnitCollectionServiceClient")
-                if ucs and ucs.get_equipped_unit_by_uuid then
-                    local owned = ucs.get_equipped_unit_by_uuid(info.uuid)
-                    if owned then
-                        unitId = owned.unit_id or owned.unitId or owned.id or unitId
-                    end
+function UpdateInfinityBuffStatus(message, color)
+    SetBuffRotationStatus(message, color)
+end
+
+function ResolveUnitActiveAttackId(unit, stats, unitData, upgradeLevel)
+    local activeValue = stats and stats:FindFirstChild("active_attack")
+    local activeId = activeValue and tostring(activeValue.Value) or "nil"
+    if activeId ~= "" and activeId ~= "nil" then
+        return activeId
+    end
+    local okCore, coreActive = pcall(function()
+        local Loader = require(ReplicatedStorage.src.Loader)
+        local core = Loader.load_core_service(game, "UnitServiceCore")
+        if core and type(core.get_active_id) == "function" then
+            return core.get_active_id(unit)
+        end
+        return nil
+    end)
+    if okCore and type(coreActive) == "string" and coreActive ~= "" and coreActive ~= "nil" then
+        return coreActive
+    end
+    if type(unitData) == "table" then
+        if type(unitData.active_attack) == "string" and unitData.active_attack ~= "" and unitData.active_attack ~= "nil" then
+            return unitData.active_attack
+        end
+        if type(unitData.upgrade) == "table" then
+            local lvl = math.min(tonumber(upgradeLevel) or 0, #unitData.upgrade)
+            local resolved = nil
+            for i = 1, lvl do
+                local upg = unitData.upgrade[i]
+                if type(upg) == "table" and type(upg.active_attack) == "string"
+                    and upg.active_attack ~= "" and upg.active_attack ~= "nil" then
+                    resolved = upg.active_attack
                 end
             end
-        end)
-        if not unitId then
-            local _, foundId = LookupUnitData(info.name)
-            unitId = foundId or info.name
-        end
-        info.unitId = tostring(unitId or info.name or "unit")
-        local data = LookupUnitData(info.unitId)
-        if data then
-            if type(data.name) == "string" and data.name ~= "" then
-                info.name = data.name
+            if resolved then
+                return resolved
             end
-            info.spawnCap = tonumber(data.spawn_cap)
-            info.globalSpawnCap = tonumber(data.global_spawn_cap)
-            info.maxUpgrade = type(data.upgrade) == "table" and #data.upgrade or nil
-            info.hybrid = data.hybrid_placement == true
-            info.hill = data.hill_unit == true
-        end
-        if info.name and info.name ~= "" and info.name ~= "Unit" then
-            State.UnitNames[info.unitId] = info.name
         end
     end
-    return list
+    return nil
+end
+
+function GetBuffRotationGroups(now)
+    now = now or tick()
+    SyncReplicatedGameData()
+    local attacksReplicate = GetAttacksReplicateService()
+    local globalCooldowns = attacksReplicate and type(attacksReplicate.GLOBAL_ATTACK_COOLDOWNS) == "table"
+        and attacksReplicate.GLOBAL_ATTACK_COOLDOWNS or nil
+
+    local groups = {}
+    local elfyInfo = { total = 0, withoutActive = 0 }
+    local liveModels = {}
+    for _, unit in ipairs(GetPlayerUnits()) do
+        local stats = unit:FindFirstChild("_stats")
+        if stats then
+            liveModels[unit] = true
+            local rawId = GetRawUnitId(unit)
+            local unitData = LookupUnitData(rawId)
+            local upgradeValue = stats:FindFirstChild("upgrade")
+            local upgradeLevel = upgradeValue and tonumber(upgradeValue.Value) or 0
+
+            -- Same source as UnitServiceCore.get_active_id(): the live
+            -- _stats.active_attack value, with fallbacks to UnitServiceCore
+            -- and replicated unit upgrade data.
+            local activeId = ResolveUnitActiveAttackId(unit, stats, unitData, upgradeLevel)
+
+            local isElfy = IsElfyFamilyUnit(rawId, unitData, unit)
+            if isElfy then
+                elfyInfo.total = elfyInfo.total + 1
+                if not activeId then
+                    elfyInfo.withoutActive = elfyInfo.withoutActive + 1
+                end
+            end
+
+            local definition = activeId and BUFF_ROTATION_ATTACKS[activeId] or nil
+            if not definition and activeId then
+                local lowerActive = activeId:lower()
+                local isElfyActive = isElfy
+                    or lowerActive:find("leafa", 1, true) ~= nil
+                    or lowerActive:find("elfy", 1, true) ~= nil
+                    or lowerActive:find("sylph", 1, true) ~= nil
+                    or lowerActive:find("verdant", 1, true) ~= nil
+                    or lowerActive:find("enchant", 1, true) ~= nil
+                if isElfyActive then
+                    definition = {
+                        name = "Elfy (Sylph) - " .. tostring(GetAttackDisplayName(activeId, "Verdant Enchantment")),
+                        duration = BUFF_ROTATION_ELFY_DEFAULT.duration,
+                        buff = BUFF_ROTATION_ELFY_DEFAULT.buff,
+                        unit = "elfy",
+                        baseCooldown = BUFF_ROTATION_ELFY_DEFAULT.baseCooldown,
+                    }
+                    BUFF_ROTATION_ATTACKS[activeId] = definition
+                elseif IsPlacedBuffUnit(unit) then
+                    definition = {
+                        name = tostring((unitData and unitData.name) or unit.Name) .. " - " .. tostring(GetAttackDisplayName(activeId, activeId)),
+                        duration = 30,
+                        buff = "Buff",
+                        unit = NormalizeName(rawId),
+                        baseCooldown = 60,
+                    }
+                    BUFF_ROTATION_ATTACKS[activeId] = definition
+                end
+            end
+
+            if definition then
+                local baseCooldown = GetUnitActiveBaseCooldown(unitData, upgradeLevel)
+                if not baseCooldown and type(unitData) == "table" and type(unitData.evolved) == "table" then
+                    baseCooldown = GetUnitActiveBaseCooldown(LookupUnitData(unitData.evolved.from), upgradeLevel)
+                end
+                baseCooldown = baseCooldown or definition.baseCooldown or BUFF_ROTATION_DEFAULT_ACTIVE_COOLDOWN
+
+                local hasCurse, curseReduction, curseKnown, curseFactor = GetUnitCurseCooldownInfo(unit)
+                local multiplier, multSource, speedStat = GetActiveCooldownMultiplier(unit, curseReduction)
+                local expectedCooldown = baseCooldown and (baseCooldown * multiplier) or nil
+
+                -- The live value is what the game itself uses for readiness, so
+                -- it is authoritative. Fall back to the game formula when the
+                -- unit does not expose active_attack_cooldown (Elfy runtime active).
+                local cooldownValue = stats:FindFirstChild("active_attack_cooldown")
+                local liveCooldown = cooldownValue and tonumber(cooldownValue.Value) or nil
+                if liveCooldown and liveCooldown <= 0 then liveCooldown = nil end
+                local globalEntry = globalCooldowns and globalCooldowns[activeId] or nil
+                local globalCooldown = type(globalEntry) == "table" and tonumber(globalEntry.cooldown) or nil
+                if globalCooldown and globalCooldown <= 0 then globalCooldown = nil end
+
+                local cooldown = liveCooldown or globalCooldown or expectedCooldown or BUFF_ROTATION_DEFAULT_ACTIVE_COOLDOWN
+                cooldown = math.max(0.1, cooldown)
+
+                -- In Lua, 0 is truthy! last_active_cast.Value starts at 0 before
+                -- the first cast, so treat <= 0 as nil so ownCast / globalCast work.
+                local lastCastValue = stats:FindFirstChild("last_active_cast")
+                local rawLiveLastCast = lastCastValue and tonumber(lastCastValue.Value) or nil
+                local validLiveLastCast = (rawLiveLastCast and rawLiveLastCast > 0 and rawLiveLastCast <= now + 5)
+                    and rawLiveLastCast or nil
+
+                local globalLastCast = nil
+                if type(globalEntry) == "table" and tonumber(globalEntry.last_cast) and tonumber(globalEntry.last_cast) > 0 then
+                    globalLastCast = tonumber(globalEntry.last_cast)
+                elseif tonumber(globalEntry) and tonumber(globalEntry) > 0 then
+                    globalLastCast = tonumber(globalEntry)
+                end
+                if globalLastCast and globalLastCast > now + 5 then
+                    globalLastCast = nil
+                end
+
+                local ownCast = BUFF_ROTATION_RUNTIME.ownCast[unit] or 0
+                local lastCast = math.max(validLiveLastCast or 0, globalLastCast or 0, ownCast or 0)
+
+                local queuedValue = stats:FindFirstChild("active_queued_or_using")
+                local queued = queuedValue and queuedValue.Value == true or false
+
+                local duration = GetAttackBuffDuration(activeId, definition.duration)
+
+                local group = groups[activeId]
+                if not group then
+                    group = {
+                        attackId = activeId,
+                        name = definition.name,
+                        buff = definition.buff,
+                        duration = duration,
+                        units = {},
+                        curseCount = 0,
+                        curseKnownCount = 0,
+                        maxCooldown = 0,
+                        baseCooldown = baseCooldown,
+                        isElfy = definition.unit == "elfy",
+                    }
+                    groups[activeId] = group
+                end
+                group.duration = math.max(group.duration or 0, duration)
+
+                table.insert(group.units, {
+                    model = unit,
+                    attackId = activeId,
+                    uuid = stats:FindFirstChild("uuid") and tostring(stats.uuid.Value) or tostring(unit),
+                    cooldown = cooldown,
+                    liveCooldown = liveCooldown,
+                    expectedCooldown = expectedCooldown,
+                    baseCooldown = baseCooldown,
+                    multiplier = multiplier,
+                    multSource = multSource,
+                    speedStat = speedStat,
+                    lastCast = lastCast,
+                    hasLiveCast = (validLiveLastCast ~= nil) or (globalLastCast ~= nil),
+                    queued = queued,
+                    hasCurse = hasCurse,
+                    curseReduction = curseReduction,
+                    curseFactor = curseFactor or 1,
+                    curseKnown = curseKnown,
+                    spd = 1 / cooldown,
+                })
+                if hasCurse then group.curseCount = group.curseCount + 1 end
+                if curseKnown then group.curseKnownCount = group.curseKnownCount + 1 end
+                group.maxCooldown = math.max(group.maxCooldown, cooldown)
+            end
+        end
+    end
+
+    for model in pairs(BUFF_ROTATION_RUNTIME.ownCast) do
+        if not liveModels[model] then
+            BUFF_ROTATION_RUNTIME.ownCast[model] = nil
+        end
+    end
+
+    for _, group in pairs(groups) do
+        table.sort(group.units, function(a, b)
+            return tostring(a.uuid) < tostring(b.uuid)
+        end)
+        local totalRate = 0
+        local multTotal = 0
+        for _, entry in ipairs(group.units) do
+            entry.spd = 1 / math.max(0.1, entry.cooldown)
+            totalRate = totalRate + entry.spd
+            multTotal = multTotal + (entry.multiplier or 1)
+        end
+        local n = #group.units
+        group.totalRate = totalRate
+        group.totalSPD = totalRate
+        group.averageSPD = n > 0 and (totalRate / n) or 0
+        group.averageMultiplier = n > 0 and (multTotal / n) or 1
+        -- Average spacing between casts if every unit is used as soon as it is ready.
+        group.interval = totalRate > 0 and (1 / totalRate) or math.huge
+        group.averageCooldown = n > 0 and (n / math.max(totalRate, 0.000001)) or math.huge
+        -- Seamless loop needs one cast every D seconds: R >= 1 / D.
+        group.requiredUnitsEstimate = math.max(1, math.ceil(group.averageCooldown / math.max(1, group.duration)))
+        group.sustainable = totalRate >= (1 / math.max(1, group.duration)) - 1e-6
+        -- Recast lead before expiry. Using a lead shortens the effective cycle,
+        -- so only use as much lead as the group's SPD can afford:
+        --   sum((D - lead) / C_i) >= 1  ->  lead <= D - 1 / R
+        local affordable = totalRate > 0 and (group.duration - 1 / totalRate) or 0
+        group.lead = math.clamp(affordable, 0, BUFF_ROTATION_SAFETY_MARGIN)
+    end
+    return groups, elfyInfo
+end
+
+function SetBuffRotationStatus(message, color)
+    if BuffRotationStatus then
+        BuffRotationStatus.Text = message
+        BuffRotationStatus.TextColor3 = color or Color3.fromRGB(160, 160, 180)
+    end
+end
+
+function GetBuffRotationCurseMode(group)
+    if group.curseKnownCount < #group.units then
+        return "Cooldown Curse unknown"
+    elseif group.curseCount == #group.units then
+        return "Curse"
+    elseif group.curseCount > 0 then
+        return "Mixed Cooldown Curse"
+    end
+    return "No Cooldown Curse"
 end
 
 -- Detect farm units from both their displayed name and unit database metadata.
@@ -1588,7 +2389,29 @@ function HitAllowsPlacement(inst, kind)
     return not onHill
 end
 
-function PlacementIsClear(pos, kind)
+function GetPlacedBuffUnitPosition(unit)
+    if not unit then return nil end
+    local stats = unit:FindFirstChild("_stats")
+    local formation = stats and stats:FindFirstChild("formation_goal")
+    if formation and formation.Value then
+        local ok, pos = pcall(function() return formation.Value.Position end)
+        if ok and pos then return pos end
+    end
+    local root = unit:FindFirstChild("_root") or (stats and stats:FindFirstChild("_root"))
+    if root and root.Value then
+        local ok, pos = pcall(function() return root.Value.Position end)
+        if ok and pos then return pos end
+    end
+    local hrp = unit:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        return hrp.Position
+    end
+    local ok, pivot = pcall(function() return unit:GetPivot().Position end)
+    return ok and pivot or nil
+end
+
+function PlacementIsClear(pos, kind, minDistance)
+    minDistance = minDistance or 2.45
     local rayParams = RaycastParams.new()
     rayParams.FilterType = Enum.RaycastFilterType.Exclude
     local ignore = {}
@@ -1613,15 +2436,144 @@ function PlacementIsClear(pos, kind)
     if unitsFolder then
         for _, unit in ipairs(unitsFolder:GetChildren()) do
             if unit:IsA("Model") then
-                local pivot = unit:GetPivot().Position
-                local flat = Vector3.new(hit.Position.X - pivot.X, 0, hit.Position.Z - pivot.Z)
-                if flat.Magnitude < 3.4 then
-                    return nil
+                local unitPos = GetPlacedBuffUnitPosition(unit)
+                if unitPos then
+                    local flat = Vector3.new(hit.Position.X - unitPos.X, 0, hit.Position.Z - unitPos.Z)
+                    if flat.Magnitude < minDistance then
+                        return nil
+                    end
                 end
             end
         end
     end
     return hit.Position
+end
+
+function BuildCompactHexOffsets(spacing, maxRing)
+    spacing = spacing or 2.6
+    maxRing = maxRing or 8
+    local offsets = { Vector2.new(0, 0) }
+    local allRingOffsets = {}
+    for ring = 1, maxRing do
+        for q = -ring, ring do
+            for r = -ring, ring do
+                local s = -q - r
+                if math.max(math.abs(q), math.abs(r), math.abs(s)) == ring then
+                    local x = spacing * (q + r * 0.5)
+                    local z = spacing * (r * 0.8660254038)
+                    table.insert(allRingOffsets, Vector2.new(x, z))
+                end
+            end
+        end
+    end
+    table.sort(allRingOffsets, function(a, b)
+        local da, db = a.Magnitude, b.Magnitude
+        if math.abs(da - db) > 0.05 then
+            return da < db
+        end
+        return math.atan2(a.Y, a.X) < math.atan2(b.Y, b.X)
+    end)
+    for _, offset in ipairs(allRingOffsets) do
+        table.insert(offsets, offset)
+    end
+    return offsets
+end
+
+-- Farm units can be ground or hill units depending on the game's unit data.
+-- If the unit database lookup misses an entry, try every valid placement surface
+-- instead of silently skipping the farm because the guessed surface was wrong.
+-- Buff units must stay together so their range-based buffs overlap.
+-- game.lua marks Commander, Windsong and Elfy (Sylph) with
+-- _show_as_buff_unit / _placement_highlight_buffed_units.
+function IsBuffUnitInfo(info)
+    if type(info) ~= "table" then return false end
+    local rawId = info.unitId or info.name
+    local data = LookupUnitData(rawId)
+    if type(data) == "table"
+        and (data._show_as_buff_unit == true or data._placement_highlight_buffed_units == true) then
+        return true
+    end
+    if IsElfyFamilyUnit(rawId, data) then
+        return true
+    end
+    local norm = NormalizeName(rawId)
+    return norm:find("erwin", 1, true) ~= nil
+        or norm:find("commander", 1, true) ~= nil
+        or norm:find("wendy", 1, true) ~= nil
+        or norm:find("windsong", 1, true) ~= nil
+end
+
+function IsPlacedBuffUnit(unit)
+    if not unit then return false end
+    local rawId = GetRawUnitId(unit)
+    local data = LookupUnitData(rawId)
+    if type(data) == "table"
+        and (data._show_as_buff_unit == true or data._placement_highlight_buffed_units == true) then
+        return true
+    end
+    if IsElfyFamilyUnit(rawId, data, unit) then
+        return true
+    end
+    local norm = NormalizeName(rawId)
+    return norm:find("erwin", 1, true) ~= nil
+        or norm:find("commander", 1, true) ~= nil
+        or norm:find("wendy", 1, true) ~= nil
+        or norm:find("windsong", 1, true) ~= nil
+end
+
+function GetClusterAnchorPosition(kind)
+    kind = kind or "ground"
+    local buffPositions = {}
+    local combatPositions = {}
+    local farmPositions = {}
+
+    for _, placed in ipairs(GetPlayerUnits()) do
+        local placedKind = ResolvePlacementKind(GetRawUnitId(placed))
+        local compatible = (kind == "hill" and (placedKind == "hill" or placedKind == "hybrid"))
+            or (kind ~= "hill" and placedKind ~= "hill")
+        if compatible then
+            local pos = GetPlacedBuffUnitPosition(placed)
+            if pos then
+                if IsPlacedBuffUnit(placed) then
+                    table.insert(buffPositions, pos)
+                elseif IsFarmUnit(placed) then
+                    table.insert(farmPositions, pos)
+                else
+                    table.insert(combatPositions, pos)
+                end
+            end
+        end
+    end
+
+    local source = #buffPositions > 0 and buffPositions
+        or (#combatPositions > 0 and combatPositions or farmPositions)
+    if #source == 0 then
+        return nil, buffPositions, combatPositions
+    end
+
+    local seed, bestNeighbors = source[1], -1
+    for _, candidateSeed in ipairs(source) do
+        local neighbors = 0
+        for _, otherPos in ipairs(source) do
+            if (candidateSeed - otherPos).Magnitude <= 14 then
+                neighbors = neighbors + 1
+            end
+        end
+        if neighbors > bestNeighbors then
+            seed, bestNeighbors = candidateSeed, neighbors
+        end
+    end
+
+    local clusterSum = Vector3.new(0, 0, 0)
+    local clusterCount = 0
+    for _, pos in ipairs(source) do
+        if (seed - pos).Magnitude <= 14 then
+            clusterSum = clusterSum + pos
+            clusterCount = clusterCount + 1
+        end
+    end
+    local anchor = clusterCount > 0 and (clusterSum / clusterCount) or seed
+    return anchor, buffPositions, combatPositions
 end
 
 function GetPlacementCFrame(index, kind)
@@ -1641,11 +2593,15 @@ function GetPlacementCFrame(index, kind)
         return CFrame.new(finalPos, finalPos + flatLook)
     end
 
+    local clusterAnchor = GetClusterAnchorPosition(kind)
+
     if #points >= 2 then
         -- Keep the whole formation around one point on the actual path.
-        -- GetPointOnPolyline uses total segment length, so different map/path
-        -- lengths still place the cluster at the selected percentage.
-        local center, look = GetPointOnPolyline(points, preferred)
+        -- Once the first unit is placed beside the road, anchor subsequent
+        -- units to the existing cluster on the same side of the road so units
+        -- stay tightly packed together.
+        local pathCenter, look = GetPointOnPolyline(points, preferred)
+        local center = clusterAnchor or pathCenter
         local right = look:Cross(Vector3.new(0, 1, 0))
         if right.Magnitude < 0.01 then
             right = Vector3.new(1, 0, 0)
@@ -1659,37 +2615,12 @@ function GetPlacementCFrame(index, kind)
             forward = forward.Unit
         end
 
-        -- Hexagonal cluster: neighboring slots are 3.8 studs apart.
-        -- PlacementIsClear still enforces the game's existing 3.4-stud
-        -- minimum-distance check and terrain / road restrictions.
-        local spacing = 3.8
-        local offsets = { Vector2.new(0, 0) }
-        local maxRing = (kind == "hill") and 16 or 5
-        for ring = 1, maxRing do
-            local ringOffsets = {}
-            for q = -ring, ring do
-                for r = -ring, ring do
-                    local s = -q - r
-                    if math.max(math.abs(q), math.abs(r), math.abs(s)) == ring then
-                        local x = spacing * (q + r * 0.5)
-                        local z = spacing * (r * 0.8660254038)
-                        table.insert(ringOffsets, Vector2.new(x, z))
-                    end
-                end
-            end
-            table.sort(ringOffsets, function(a, b)
-                return math.atan2(a.Y, a.X) < math.atan2(b.Y, b.X)
-            end)
-            for _, offset in ipairs(ringOffsets) do
-                table.insert(offsets, offset)
-            end
-        end
+        local maxRing = (kind == "hill") and 16 or 9
+        local offsets = BuildCompactHexOffsets(2.6, maxRing)
 
-        -- Prefer this unit's stable slot. If terrain, road, or an existing
-        -- unit blocks it, try the remaining nearby cluster slots.
-        local preferredSlot = ((math.max(1, math.floor(index)) - 1) % #offsets) + 1
-        for pass = 1, #offsets do
-            local slot = ((preferredSlot + pass - 2) % #offsets) + 1
+        -- Always search from the cluster center outward (slot 1 -> #offsets)
+        -- so units pack tightly instead of scattering into outer rings.
+        for slot = 1, #offsets do
             local offset = offsets[slot]
             local candidate = center + right * offset.X + forward * offset.Y
             local finalPos = PlacementIsClear(candidate, kind)
@@ -1697,38 +2628,119 @@ function GetPlacementCFrame(index, kind)
                 return Finish(finalPos, look)
             end
         end
+        if clusterAnchor then
+            for slot = 1, #offsets do
+                local offset = offsets[slot]
+                local candidate = pathCenter + right * offset.X + forward * offset.Y
+                local finalPos = PlacementIsClear(candidate, kind)
+                if finalPos then
+                    return Finish(finalPos, look)
+                end
+            end
+        end
         return nil
     end
 
     -- Preserve the previous fallback for maps where lane path points
-    -- are not exposed by the client.
+    -- are not exposed by the client, but pack tightly around the cluster.
     local char = player.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     if not hrp then
         return nil
     end
-    local angle = (index * 45) * (math.pi / 180)
-    local distance = 6 + math.floor(index / 8) * 5
-    local maxFallbackRing = (kind == "hill") and 16 or 5
-    for ring = 0, maxFallbackRing do
-        local radius = distance + ring * 4
-        for direction = 0, 7 do
-            local a = angle + direction * (math.pi / 4)
-            local pos = hrp.Position + Vector3.new(math.cos(a) * radius, 0, math.sin(a) * radius)
-            local finalPos = PlacementIsClear(pos, kind)
-            if finalPos then
-                return Finish(finalPos, hrp.CFrame.LookVector)
-            end
+    local center = clusterAnchor or hrp.Position
+    local look = hrp.CFrame.LookVector
+    local right = look:Cross(Vector3.new(0, 1, 0))
+    if right.Magnitude < 0.01 then right = Vector3.new(1, 0, 0) else right = right.Unit end
+    local forward = Vector3.new(look.X, 0, look.Z)
+    if forward.Magnitude < 0.01 then forward = Vector3.new(0, 0, -1) else forward = forward.Unit end
+
+    local maxFallbackRing = (kind == "hill") and 16 or 9
+    local offsets = BuildCompactHexOffsets(2.6, maxFallbackRing)
+    for slot = 1, #offsets do
+        local offset = offsets[slot]
+        local pos = center + right * offset.X + forward * offset.Y
+        local finalPos = PlacementIsClear(pos, kind)
+        if finalPos then
+            return Finish(finalPos, look)
         end
     end
     return nil
 end
 
--- Farm units can be ground or hill units depending on the game's unit data.
--- If the unit database lookup misses an entry, try every valid placement surface
--- instead of silently skipping the farm because the guessed surface was wrong.
+function GetBuffPlacementCFrame(index, info, kind)
+    kind = kind or ResolvePlacementKind(info and info.unitId)
+    local anchor, buffPositions, combatPositions = GetClusterAnchorPosition(kind)
+
+    local center, look
+    local lane = GetPath1Lane()
+    local points = lane and GetPathPoints(lane) or {}
+    local preferred = math.clamp(tonumber(State.PlacePercent) or 0, 0, 100) / 100
+    if #points >= 2 then
+        local _, pathLook = GetPointOnPolyline(points, preferred)
+        look = pathLook
+    end
+
+    if anchor then
+        center = anchor
+        if not look then
+            local base = GetPlacementCFrame(1, kind)
+            look = base and base.LookVector or Vector3.new(0, 0, -1)
+        end
+    else
+        local base = GetPlacementCFrame(1, kind)
+        if not base then return nil end
+        center = base.Position
+        look = look or base.LookVector
+    end
+
+    local flatLook = Vector3.new(look.X, 0, look.Z)
+    if flatLook.Magnitude < 0.01 then
+        flatLook = Vector3.new(0, 0, -1)
+    else
+        flatLook = flatLook.Unit
+    end
+    local right = flatLook:Cross(Vector3.new(0, 1, 0))
+    if right.Magnitude < 0.01 then right = Vector3.new(1, 0, 0) else right = right.Unit end
+
+    -- Compact 2.6-stud hex grid keeps all buff units and nearby combat units
+    -- tightly grouped well inside Commander (15), Windsong (20), and Elfy (25)
+    -- range circles.
+    local offsets = BuildCompactHexOffsets(2.55, 7)
+    local referencePositions = #buffPositions > 0 and buffPositions or combatPositions
+
+    local bestCFrame, bestScore = nil, math.huge
+    for _, offset in ipairs(offsets) do
+        local candidate = center + right * offset.X + flatLook * offset.Y
+        local finalPos = PlacementIsClear(candidate, kind)
+        if finalPos then
+            local maxRefDistance = 0
+            local sumRefDistance = 0
+            for _, existingPos in ipairs(referencePositions) do
+                local d = (finalPos - existingPos).Magnitude
+                maxRefDistance = math.max(maxRefDistance, d)
+                sumRefDistance = sumRefDistance + d
+            end
+            local avgRefDistance = #referencePositions > 0 and (sumRefDistance / #referencePositions) or 0
+            local score = offset.Magnitude + avgRefDistance * 0.6 + maxRefDistance * 0.4
+            if (maxRefDistance <= 14.5 or bestCFrame == nil) and score < bestScore then
+                bestScore = score
+                bestCFrame = CFrame.new(finalPos, finalPos + flatLook)
+                if maxRefDistance <= 6.5 and offset.Magnitude <= 5.5 then
+                    break
+                end
+            end
+        end
+    end
+    return bestCFrame
+end
+
 function GetPlacementCFrameForInfo(index, info)
     local primary = ResolvePlacementKind(info and info.unitId)
+    if IsBuffUnitInfo(info) then
+        local clustered = GetBuffPlacementCFrame(index, info, primary)
+        if clustered then return clustered, primary end
+    end
     local kinds = { primary }
     if IsFarmInfo(info) then
         for _, candidate in ipairs({ "ground", "hill", "hybrid" }) do
@@ -1756,20 +2768,58 @@ function CountCategory(myUnits, pred)
     return n
 end
 
+function SafeCloneTable(tbl)
+    if type(tbl) ~= "table" then return tbl end
+    local ok, res = pcall(function()
+        if type(table.clone) == "function" then
+            return table.clone(tbl)
+        end
+    end)
+    if ok and type(res) == "table" then
+        return res
+    end
+    local copy = {}
+    for k, v in pairs(tbl) do
+        copy[k] = type(v) == "table" and SafeCloneTable(v) or v
+    end
+    return copy
+end
+
+local function ResolveHttpRequestFunction()
+    if type(syn) == "table" and type(syn.request) == "function" then return syn.request end
+    if type(http) == "table" and type(http.request) == "function" then return http.request end
+    if type(http_request) == "function" then return http_request end
+    if type(request) == "function" then return request end
+    if type(fluxus) == "table" and type(fluxus.request) == "function" then return fluxus.request end
+    if type(getgenv) == "function" then
+        local ok, g = pcall(getgenv)
+        if ok and type(g) == "table" then
+            if type(g.request) == "function" then return g.request end
+            if type(g.http_request) == "function" then return g.http_request end
+        end
+    end
+    return nil
+end
+
 function HttpPost(url, body)
-    local payload = {
-        Url = url,
-        Method = "POST",
-        Headers = { ["Content-Type"] = "application/json" },
-        Body = body,
-    }
-    local fn = (syn and syn.request)
-        or (http and http.request)
-        or http_request
-        or request
-        or (fluxus and fluxus.request)
+    local fn = ResolveHttpRequestFunction()
     if fn then
-        return fn(payload)
+        local ok, res = pcall(fn, {
+            Url = url,
+            Method = "POST",
+            Headers = { ["Content-Type"] = "application/json" },
+            Body = body,
+        })
+        if ok and res ~= nil then return res end
+
+        local okLower, resLower = pcall(fn, {
+            url = url,
+            method = "POST",
+            headers = { ["Content-Type"] = "application/json" },
+            body = body,
+        })
+        if okLower and resLower ~= nil then return resLower end
+        if not ok then error(res or "HTTP request error") end
     end
     return HttpService:PostAsync(url, body, Enum.HttpContentType.ApplicationJson)
 end
@@ -1793,29 +2843,160 @@ end
 
 function DescribeWebhookResult(ok, result)
     if not ok then
-        return false, tostring(result)
+        return false, tostring(result), nil
     end
     if type(result) == "table" then
         local code = tonumber(result.StatusCode or result.status_code or result.Status or result.status)
         local requestSucceeded = result.Success
         if requestSucceeded == nil then requestSucceeded = result.success end
         local body = tostring(result.Body or result.body or "")
+        local headers = result.Headers or result.headers or {}
+        local retryAfter
+        for key, value in pairs(headers) do
+            local lowerKey = string.lower(tostring(key))
+            if lowerKey == "retry-after" or lowerKey == "x-ratelimit-reset-after" then
+                retryAfter = tonumber(value)
+                if retryAfter then break end
+            end
+        end
+        if not retryAfter and type(result.Body or result.body) == "string" then
+            local okJson, decoded = pcall(function()
+                return HttpService:JSONDecode(result.Body or result.body)
+            end)
+            if okJson and type(decoded) == "table" then
+                retryAfter = tonumber(decoded.retry_after)
+            end
+        end
+        if retryAfter then retryAfter = math.clamp(retryAfter, 1, 120) end
         if #body > 180 then body = body:sub(1, 180) end
 
         if requestSucceeded == false then
-            return false, (code and ("HTTP " .. tostring(code) .. ": ") or "Request failed: ") .. body
+            return false, (code and ("HTTP " .. tostring(code) .. ": ") or "Request failed: ") .. body, retryAfter
         end
         if code and (code < 200 or code >= 300) then
             if body ~= "" then
-                return false, "HTTP " .. tostring(code) .. ": " .. body
+                return false, "HTTP " .. tostring(code) .. ": " .. body, retryAfter
             end
-            return false, "HTTP " .. tostring(code)
+            return false, "HTTP " .. tostring(code), retryAfter
         end
     end
     -- Discord webhooks commonly answer with HTTP 204 and an empty body.
-    return true, "Webhook request accepted."
+    return true, "Webhook request accepted.", nil
 end
 
+
+-- Game session and profile helpers used across automation, stats, and webhook reporting.
+function FindLocalGameSession()
+    local ok, session = pcall(function()
+        local Loader = require(ReplicatedStorage.src.Loader)
+        local invService = Loader.load_client_service(game, "ItemInventoryServiceClient")
+        if invService and invService.session and invService.session.player == player then
+            return invService.session
+        end
+        local unitService = Loader.load_client_service(game, "UnitCollectionServiceClient")
+        if unitService and unitService.session and unitService.session.player == player then
+            return unitService.session
+        end
+        local guiService = Loader.load_client_service(game, "GUIService")
+        if guiService and guiService.session and guiService.session.player == player then
+            return guiService.session
+        end
+        return nil
+    end)
+    if ok and type(session) == "table" then return session end
+
+    local okGui, guiService = pcall(function()
+        local src = ReplicatedStorage:FindFirstChild("src")
+        local client = src and src:FindFirstChild("client")
+        local services = client and client:FindFirstChild("Services")
+        local module = services and services:FindFirstChild("GUIService")
+        if module and module:IsA("ModuleScript") then return require(module) end
+        return nil
+    end)
+    if okGui and type(guiService) == "table" then
+        local s = guiService.session
+        if type(s) == "table" and s.player == player then
+            return s
+        end
+    end
+
+    if type(getgc) ~= "function" then return nil end
+    local gcOk, objects = pcall(getgc, true)
+    if not gcOk or type(objects) ~= "table" then return nil end
+    for _, object in ipairs(objects) do
+        if type(object) == "table" then
+            local candidates = { object, object.session }
+            for _, candidate in ipairs(candidates) do
+                if type(candidate) == "table" and candidate.player == player
+                    and (type(candidate.collection) == "table" or type(candidate.inventory) == "table") then
+                    return candidate
+                end
+            end
+        end
+    end
+    return nil
+end
+
+function FindLocalInventoryProfile()
+    local session = FindLocalGameSession()
+    if session then
+        if type(session.inventory) == "table" and type(session.inventory.inventory_profile_data) == "table" then
+            return session.inventory.inventory_profile_data
+        elseif type(session.inventory_profile_data) == "table" then
+            return session.inventory_profile_data
+        elseif type(session.profile_data) == "table" and type(session.profile_data.unique_items) == "table" then
+            return session.profile_data
+        end
+    end
+
+    if type(getgc) ~= "function" then return nil end
+    local ok, objects = pcall(getgc, true)
+    if not ok or type(objects) ~= "table" then return nil end
+    for _, object in ipairs(objects) do
+        if type(object) == "table" then
+            local candidates = { object, object.session }
+            for _, candidate in ipairs(candidates) do
+                if type(candidate) == "table" and candidate.player == player then
+                    local inventory = candidate.inventory
+                    local profile = type(inventory) == "table" and inventory.inventory_profile_data or candidate.inventory_profile_data
+                    if type(profile) == "table" and type(profile.unique_items) == "table" then
+                        return profile
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+function FindLocalCollectionProfile()
+    local session = FindLocalGameSession()
+    if session then
+        if type(session.collection) == "table" and type(session.collection.collection_profile_data) == "table" then
+            return session.collection.collection_profile_data
+        elseif type(session.collection_profile_data) == "table" then
+            return session.collection_profile_data
+        end
+    end
+
+    if type(getgc) ~= "function" then return nil end
+    local ok, objects = pcall(getgc, true)
+    if not ok or type(objects) ~= "table" then return nil end
+    for _, object in ipairs(objects) do
+        if type(object) == "table" then
+            local candidates = { object, object.session }
+            for _, candidate in ipairs(candidates) do
+                if type(candidate) == "table" and candidate.player == player then
+                    local col = candidate.collection_profile_data or (type(candidate.collection) == "table" and candidate.collection.collection_profile_data)
+                    if type(col) == "table" and type(col.owned_units) == "table" then
+                        return col
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
 
 function ReadPlayerCurrencies()
     local values = {}
@@ -1870,13 +3051,18 @@ function FormatCompact(value)
 end
 
 function ReadTraitRerolls()
+    local profile = FindLocalInventoryProfile()
+    if profile and profile.trait_reroll_tokens ~= nil then
+        return tonumber(profile.trait_reroll_tokens)
+    end
+
     local ok, amount = pcall(function()
         local Loader = require(ReplicatedStorage.src.Loader)
         local inventoryService = Loader.load_client_service(game, "ItemInventoryServiceClient")
         local session = inventoryService and inventoryService.session
-        local profile = session and session.profile_data
-        if profile and profile.trait_reroll_tokens ~= nil then
-            return tonumber(profile.trait_reroll_tokens)
+        local prof = session and session.profile_data
+        if prof and prof.trait_reroll_tokens ~= nil then
+            return tonumber(prof.trait_reroll_tokens)
         end
         local inventory = session and session.inventory
         if inventory and type(inventory.get_number_of_owned_item) == "function" then
@@ -1887,24 +3073,45 @@ function ReadTraitRerolls()
     return ok and tonumber(amount) or nil
 end
 
-function BuildPlayerStatsText(currencies)
+function BuildPlayerStatsText(currencies, beforeCurrencies)
     local traitCount = ReadTraitRerolls()
     local lines = {}
     local gemEmoji = "<:GemAA:1563613761544392794>"
     local goldEmoji = "<:GoldAA:1566642394412220508>"
     local summerEmoji = "<:SummerAA:1566642524636840128>"
     local traitEmoji = "<:TraitAA:1566642609479360642>"
-    table.insert(lines, gemEmoji .. " **Gem:** " .. FormatNumber(currencies.Gems or 0))
-    table.insert(lines, goldEmoji .. " **Gold:** " .. FormatNumber(currencies.Gold or 0))
+
+    local function DiffText(curr, before)
+        if not before then return "" end
+        local delta = (tonumber(curr) or 0) - (tonumber(before) or 0)
+        if delta > 0 then
+            return " `(+" .. FormatNumber(delta) .. ")`"
+        elseif delta < 0 then
+            return " `(-" .. FormatNumber(math.abs(delta)) .. ")`"
+        end
+        return ""
+    end
+
+    local gems = currencies.Gems or 0
+    local gold = currencies.Gold or 0
     local summer = currencies.SummerPearls or currencies.summer_pearls or currencies.Summerpearls
     if summer == nil then
         for key, value in pairs(currencies) do
             if tostring(key):lower():find("summerpearls", 1, true) then summer = value break end
         end
     end
-    table.insert(lines, summerEmoji .. " **Summer Pearls:** " .. FormatNumber(summer or 0))
+    local trophies = currencies.Trophies or 0
+
+    local beforeSummer = beforeCurrencies and (beforeCurrencies.SummerPearls or beforeCurrencies.summer_pearls or beforeCurrencies.Summerpearls)
+
+    table.insert(lines, gemEmoji .. " **Gem:** " .. FormatNumber(gems) .. DiffText(gems, beforeCurrencies and beforeCurrencies.Gems))
+    table.insert(lines, goldEmoji .. " **Gold:** " .. FormatNumber(gold) .. DiffText(gold, beforeCurrencies and beforeCurrencies.Gold))
+    table.insert(lines, summerEmoji .. " **Summer Pearls:** " .. FormatNumber(summer or 0) .. DiffText(summer or 0, beforeSummer))
     if traitCount ~= nil then
         table.insert(lines, traitEmoji .. " **Trait:** " .. FormatNumber(traitCount))
+    end
+    if trophies > 0 or (beforeCurrencies and (beforeCurrencies.Trophies or 0) > 0) then
+        table.insert(lines, "🏆 **Trophies:** " .. FormatNumber(trophies) .. DiffText(trophies, beforeCurrencies and beforeCurrencies.Trophies))
     end
     return table.concat(lines, "\n")
 end
@@ -1963,6 +3170,22 @@ end
 task.spawn(function()
     while ScreenGui.Parent do
         task.wait(0.25)
+
+        if State.BlackScreen then
+            local highestDisplayOrder = 9999
+            for _, gui in ipairs(playerGui:GetChildren()) do
+                if gui:IsA("ScreenGui") and gui ~= ScreenGui then
+                    highestDisplayOrder = math.max(highestDisplayOrder, gui.DisplayOrder)
+                end
+            end
+            local targetDisplayOrder = math.min(highestDisplayOrder + 1, 2147483000)
+            if ScreenGui.DisplayOrder ~= targetDisplayOrder then
+                ScreenGui.DisplayOrder = targetDisplayOrder
+            end
+        elseif ScreenGui.DisplayOrder ~= 10000 then
+            ScreenGui.DisplayOrder = 10000
+        end
+
         local dataFolder = workspace:FindFirstChild("_DATA")
         local gameStarted = dataFolder and dataFolder:FindFirstChild("GameStarted")
         local gameFinished = dataFolder and dataFolder:FindFirstChild("GameFinished")
@@ -2023,20 +3246,33 @@ function BuildRewardText(before, after)
 end
 
 function ReadAuthoritativeResultSettings()
-    -- game.lua ResultsUI.new() stores the ResultsUI ScreenGui in screenGUI,
-    -- and ResultsUI.show_results(settings) stores the exact server result in .settings.
-    local results = playerGui:FindFirstChild("ResultsUI")
-    if not results or results.Enabled ~= true or type(getgc) ~= "function" then return nil end
+    -- 1. Try direct read from GUIService.results_ui (fast and authoritative)
+    local ok, settings = pcall(function()
+        local Loader = require(ReplicatedStorage.src.Loader)
+        local guiService = Loader.load_client_service(game, "GUIService")
+        local resultsUi = guiService and guiService.results_ui
+        if resultsUi and type(resultsUi.settings) == "table"
+            and type(resultsUi.settings.victory) == "boolean"
+            and type(resultsUi.settings.stats) == "table" then
+            return resultsUi.settings
+        end
+        return nil
+    end)
+    if ok and settings then return settings end
 
-    local ok, objects = pcall(getgc, true)
-    if not ok or type(objects) ~= "table" then return nil end
+    -- 2. Fallback: scan getgc for ResultsUI ScreenGui owner
+    local results = playerGui:FindFirstChild("ResultsUI")
+    if not results or type(getgc) ~= "function" then return nil end
+
+    local gcOk, objects = pcall(getgc, true)
+    if not gcOk or type(objects) ~= "table" then return nil end
 
     for _, object in ipairs(objects) do
         if type(object) == "table" and object.screenGUI == results then
-            local settings = object.settings
-            if type(settings) == "table" and type(settings.victory) == "boolean"
-                and type(settings.stats) == "table" then
-                return settings
+            local s = object.settings
+            if type(s) == "table" and type(s.victory) == "boolean"
+                and type(s.stats) == "table" then
+                return s
             end
         end
     end
@@ -2066,19 +3302,23 @@ function GetResultDetails()
     -- UI fallback for executors where the ResultsUI controller cannot be read.
     local results = playerGui:FindFirstChild("ResultsUI")
     local holder = results and results:FindFirstChild("Holder")
-    if results and results.Enabled == true and holder and holder.Visible == true then
+    if results and holder then
         local levelName = holder:FindFirstChild("LevelName")
-        if levelName and levelName:IsA("TextLabel") then details.level = levelName.Text end
+        if levelName and levelName:IsA("TextLabel") and levelName.Text ~= "" then
+            details.level = levelName.Text
+        end
         local title = holder:FindFirstChild("Title")
-        if title and title:IsA("TextLabel") then details.result = title.Text end
+        if title and title:IsA("TextLabel") and title.Text ~= "" then
+            details.result = title.Text
+        end
         local middle = holder:FindFirstChild("Middle")
         if middle then
             local timer = middle:FindFirstChild("Timer")
-            if timer and timer:IsA("TextLabel") then
+            if timer and timer:IsA("TextLabel") and timer.Text ~= "" then
                 details.Timer = tostring(timer.Text):gsub("^Total Time:%s*", "")
             end
             local waves = middle:FindFirstChild("WavesCompleted")
-            if waves and waves:IsA("TextLabel") then
+            if waves and waves:IsA("TextLabel") and waves.Text ~= "" then
                 details.WavesCompleted = tostring(waves.Text):gsub("^Waves Completed:%s*", "")
             end
         end
@@ -2117,9 +3357,6 @@ function BuildCurrencyLines(before, after)
     return table.concat(lines, "\n")
 end
 
-
--- ResultsUI is populated directly from ResultsUI.show_results(settings).
--- ResourceReward frames therefore provide the authoritative per-stage resource amounts.
 function ReadResultResourceRewards()
     local rewards = {}
     local results = playerGui:FindFirstChild("ResultsUI")
@@ -2157,95 +3394,352 @@ function BuildResourceRewardLines(rewards)
     return table.concat(lines, "\n")
 end
 
--- Snapshot unique Secret rewards at match start so Webhook can report only
--- Secret Units / Secret Portals newly granted by this match.
 function LoadGameDataModule(moduleName)
+    local ok, data = pcall(function()
+        local Loader = require(ReplicatedStorage.src.Loader)
+        return Loader.load_data(game, moduleName)
+    end)
+    if ok and type(data) == "table" then return data end
+
     local module = ReplicatedStorage:FindFirstChild(moduleName, true)
     if module and module:IsA("ModuleScript") then
-        local ok, data = pcall(require, module)
-        if ok and type(data) == "table" then return data end
+        local okReq, res = pcall(require, module)
+        if okReq and type(res) == "table" then return res end
     end
     return nil
 end
 
-function ReadSecretRewardSnapshot()
+function ReadInventoryRewardSnapshot()
     local snapshot = {}
-    if type(getgc) ~= "function" then return snapshot, false end
-    local ok, objects = pcall(getgc, true)
-    if not ok or type(objects) ~= "table" then return snapshot, false end
+    local inventoryProfile = FindLocalInventoryProfile()
+    local collectionProfile = FindLocalCollectionProfile()
 
     local itemData = LoadGameDataModule("Items") or {}
     local unitData = LoadGameDataModule("Units") or {}
-    local inventoryProfile, collectionProfile = nil, nil
-
-    for _, object in ipairs(objects) do
-        if type(object) == "table" then
-            local session = object.session
-            local inventory = object.inventory or (type(session) == "table" and session.inventory)
-            local profile = type(inventory) == "table" and inventory.inventory_profile_data or object.inventory_profile_data
-            if type(profile) == "table" and type(profile.unique_items) == "table" then
-                inventoryProfile = profile
-            end
-            local directCollection = object.collection_profile_data
-            if type(directCollection) == "table" and type(directCollection.owned_units) == "table" then
-                collectionProfile = directCollection
-            end
-            local collection = object.collection or (type(session) == "table" and session.collection)
-            if type(collection) == "table" and type(collection.collection_profile_data) == "table"
-                and type(collection.collection_profile_data.owned_units) == "table" then
-                collectionProfile = collection.collection_profile_data
-            end
-        end
-    end
 
     if inventoryProfile then
-        for _, owned in pairs(inventoryProfile.unique_items) do
+        for itemId, amount in pairs(inventoryProfile.normal_items or {}) do
+            local count = tonumber(amount) or 0
+            if count > 0 then
+                local def = itemData[itemId] or {}
+                local rarity = tostring(def.rarity or "Unknown")
+                snapshot["normal:" .. tostring(itemId)] = {
+                    id = tostring(itemId),
+                    category = tostring(def.item_group or "Item"),
+                    name = tostring(def.name or itemId),
+                    rarity = rarity,
+                    tier = tonumber(def.tier),
+                    amount = count,
+                    total_owned = count,
+                    secret = rarity:lower() == "secret",
+                }
+            end
+        end
+
+        local totalOwnedPerId = {}
+        for _, owned in pairs(inventoryProfile.unique_items or {}) do
+            if type(owned) == "table" and type(owned.item_id) == "string" then
+                totalOwnedPerId[owned.item_id] = (totalOwnedPerId[owned.item_id] or 0) + 1
+            end
+        end
+
+        for _, owned in pairs(inventoryProfile.unique_items or {}) do
             if type(owned) == "table" and type(owned.uuid) == "string" and type(owned.item_id) == "string" then
-                local def = itemData[owned.item_id]
-                if type(def) == "table" and def.rarity == "Secret" then
-                    local category = def.item_group == "Portals" and "Secret Portal" or "Secret Item"
-                    snapshot["item:" .. owned.uuid] = { category = category, name = tostring(def.name or owned.item_id) }
-                end
+                local def = itemData[owned.item_id] or {}
+                local portalData = type(owned._unique_item_data) == "table" and owned._unique_item_data._unique_portal_data
+                local tier = tonumber(portalData and portalData.portal_depth) or tonumber(def.tier)
+                local rarity = tostring(def.rarity or "Unknown")
+                local cat = tostring(def.item_group or "Item")
+                local isSecret = rarity:lower() == "secret" or (tier and tier >= 10 and cat:lower():find("portal", 1, true) ~= nil)
+                snapshot["item:" .. owned.uuid] = {
+                    id = tostring(owned.item_id),
+                    uuid = owned.uuid,
+                    category = cat,
+                    name = tostring(def.name or owned.item_id),
+                    rarity = rarity,
+                    tier = tier,
+                    amount = 1,
+                    total_owned = totalOwnedPerId[owned.item_id] or 1,
+                    secret = isSecret,
+                }
             end
         end
     end
 
     if collectionProfile then
-        for uuid, owned in pairs(collectionProfile.owned_units) do
+        local totalOwnedPerUnitId = {}
+        for _, owned in pairs(collectionProfile.owned_units or {}) do
             if type(owned) == "table" and type(owned.unit_id) == "string" then
-                local def = unitData[owned.unit_id]
-                if type(def) == "table" and def.rarity == "Secret" then
-                    snapshot["unit:" .. tostring(uuid)] = { category = "Secret Unit", name = tostring(def.name or owned.unit_id) }
+                totalOwnedPerUnitId[owned.unit_id] = (totalOwnedPerUnitId[owned.unit_id] or 0) + 1
+            end
+        end
+
+        for uuid, owned in pairs(collectionProfile.owned_units or {}) do
+            if type(owned) == "table" and type(owned.unit_id) == "string" then
+                local def = unitData[owned.unit_id] or {}
+                local rarity = tostring(def.rarity or "Unknown")
+                snapshot["unit:" .. tostring(uuid)] = {
+                    id = tostring(owned.unit_id),
+                    uuid = tostring(uuid),
+                    category = "Unit",
+                    name = tostring(def.name or owned.unit_id),
+                    rarity = rarity,
+                    amount = 1,
+                    shiny = owned.shiny == true,
+                    total_owned = totalOwnedPerUnitId[owned.unit_id] or 1,
+                    secret = rarity:lower() == "secret",
+                }
+            end
+        end
+    end
+
+    return snapshot, (inventoryProfile ~= nil or collectionProfile ~= nil), inventoryProfile, collectionProfile
+end
+
+function CollectAllMatchDrops(settings, inventoryBefore, inventoryAfter, invProfAfter, colProfileAfter)
+    local itemData = LoadGameDataModule("Items") or {}
+    local unitData = LoadGameDataModule("Units") or {}
+    local drops = {}
+
+    local function GetItemTotalOwned(itemId, isUnique)
+        if isUnique then
+            local count = 0
+            if invProfileAfter and type(invProfileAfter.unique_items) == "table" then
+                for _, u in pairs(invProfileAfter.unique_items) do
+                    if type(u) == "table" and u.item_id == itemId then
+                        count = count + 1
+                    end
+                end
+            end
+            return count > 0 and count or nil
+        else
+            if invProfileAfter and type(invProfileAfter.normal_items) == "table" then
+                local amt = tonumber(invProfileAfter.normal_items[itemId])
+                if amt then return amt end
+            end
+            local snap = inventoryAfter and inventoryAfter["normal:" .. tostring(itemId)]
+            return snap and snap.total_owned or nil
+        end
+    end
+
+    local function GetUnitTotalOwned(unitId)
+        local count = 0
+        if colProfileAfter and type(colProfileAfter.owned_units) == "table" then
+            for _, u in pairs(colProfileAfter.owned_units) do
+                if type(u) == "table" and u.unit_id == unitId then
+                    count = count + 1
+                end
+            end
+        end
+        return count > 0 and count or nil
+    end
+
+    -- 1. Authoritative drops from ResultsUI settings.new_items
+    if type(settings) == "table" and type(settings.new_items) == "table" then
+        for _, rawItem in pairs(settings.new_items) do
+            if type(rawItem) == "table" and rawItem.item_id then
+                local itemId = tostring(rawItem.item_id)
+                local def = itemData[itemId] or {}
+                local cat = tostring(def.item_group or "Item")
+                local name = tostring(def.name or itemId)
+                local rarity = tostring(def.rarity or "Unknown")
+
+                local portalData = type(rawItem._unique_item_data) == "table" and rawItem._unique_item_data._unique_portal_data
+                local tier = tonumber(portalData and portalData.portal_depth) or tonumber(def.tier)
+                local isSecret = rarity:lower() == "secret" or (tier and tier >= 10 and cat:lower():find("portal", 1, true) ~= nil)
+
+                if rawItem.uuid then
+                    local key = "item:" .. tostring(rawItem.uuid)
+                    drops[key] = {
+                        key = key,
+                        id = itemId,
+                        uuid = rawItem.uuid,
+                        category = cat,
+                        name = name,
+                        rarity = rarity,
+                        tier = tier,
+                        amount = 1,
+                        total_owned = GetItemTotalOwned(itemId, true),
+                        secret = isSecret,
+                    }
+                else
+                    local amount = tonumber(rawItem.amount) or 1
+                    local key = "normal:" .. itemId
+                    if drops[key] then
+                        drops[key].amount = drops[key].amount + amount
+                    else
+                        drops[key] = {
+                            key = key,
+                            id = itemId,
+                            category = cat,
+                            name = name,
+                            rarity = rarity,
+                            tier = tier,
+                            amount = amount,
+                            total_owned = GetItemTotalOwned(itemId, false),
+                            secret = isSecret,
+                        }
+                    end
                 end
             end
         end
     end
-    return snapshot, inventoryProfile ~= nil or collectionProfile ~= nil
+
+    -- 2. Authoritative units from ResultsUI settings.new_units
+    if type(settings) == "table" and type(settings.new_units) == "table" then
+        for _, unitUuid in pairs(settings.new_units) do
+            local uuidStr = tostring(unitUuid)
+            local key = "unit:" .. uuidStr
+            local unitInfo = nil
+
+            if colProfileAfter and type(colProfileAfter.owned_units) == "table" then
+                unitInfo = colProfileAfter.owned_units[unitUuid] or colProfileAfter.owned_units[uuidStr]
+            end
+            if not unitInfo and inventoryAfter and inventoryAfter[key] then
+                unitInfo = inventoryAfter[key]
+            end
+
+            local unitId = unitInfo and (unitInfo.unit_id or unitInfo.id) or uuidStr
+            local def = unitData[unitId] or {}
+            local name = tostring(def.name or (unitInfo and unitInfo.name) or unitId)
+            local rarity = tostring(def.rarity or (unitInfo and unitInfo.rarity) or "Unknown")
+            local isShiny = unitInfo and (unitInfo.shiny == true or unitInfo._shiny == true)
+            local isSecret = rarity:lower() == "secret"
+
+            drops[key] = {
+                key = key,
+                id = unitId,
+                uuid = uuidStr,
+                category = "Unit",
+                name = name,
+                rarity = rarity,
+                amount = 1,
+                shiny = isShiny,
+                total_owned = GetUnitTotalOwned(unitId),
+                secret = isSecret,
+            }
+        end
+    end
+
+    -- 3. Inventory Diff fallback (captures any dropped items not listed in settings)
+    if type(inventoryAfter) == "table" then
+        for key, snap in pairs(inventoryAfter) do
+            local old = inventoryBefore and inventoryBefore[key]
+            local amount = tonumber(snap.amount) or 1
+            local gained = 0
+
+            if key:sub(1, 7) == "normal:" then
+                local oldAmount = old and tonumber(old.amount) or 0
+                gained = math.max(0, amount - oldAmount)
+            elseif not old then
+                gained = 1
+            end
+
+            if gained > 0 then
+                if drops[key] then
+                    drops[key].amount = math.max(drops[key].amount, gained)
+                    if snap.total_owned then drops[key].total_owned = snap.total_owned end
+                else
+                    drops[key] = {
+                        key = key,
+                        id = snap.id or key,
+                        uuid = snap.uuid,
+                        category = snap.category or "Item",
+                        name = snap.name or key,
+                        rarity = snap.rarity or "Unknown",
+                        tier = snap.tier,
+                        amount = gained,
+                        shiny = snap.shiny,
+                        total_owned = snap.total_owned or snap.amount,
+                        secret = snap.secret or tostring(snap.rarity):lower() == "secret",
+                    }
+                end
+            end
+        end
+    end
+
+    return drops
 end
 
-function BuildSecretRewardLines(before, after)
-    local totals = { ["Secret Unit"] = {}, ["Secret Portal"] = {} }
-    for key, reward in pairs(after or {}) do
-        if not (before and before[key]) and totals[reward.category] then
-            local name = reward.name or "Unknown"
-            totals[reward.category][name] = (totals[reward.category][name] or 0) + 1
+function BuildCategorizedDropFields(drops)
+    local secretEntries = {}
+    local portalEntries = {}
+    local charmEntries = {}
+    local itemEntries = {}
+    local unitEntries = {}
+
+    for _, drop in pairs(drops or {}) do
+        local amount = tonumber(drop.amount) or 1
+        if amount > 0 then
+            local cat = tostring(drop.category or "Item")
+            local name = tostring(drop.name or "Unknown")
+            local rarity = drop.rarity and drop.rarity ~= "" and drop.rarity ~= "Unknown" and (" · " .. tostring(drop.rarity)) or ""
+            local tier = drop.tier and (" · Tier " .. tostring(drop.tier)) or ""
+            local total = drop.total_owned and (" *(Total: " .. FormatNumber(drop.total_owned) .. ")*") or ""
+            local shiny = drop.shiny and " ✨ Shiny ✨" or ""
+
+            if drop.secret then
+                table.insert(secretEntries, {
+                    sort = name .. cat,
+                    line = string.format("🌈 **✨ %s ×%s%s ✨** — %s%s%s%s", name, FormatNumber(amount), shiny, cat, rarity, tier, total)
+                })
+            elseif cat:lower():find("portal", 1, true) or name:lower():find("portal", 1, true) then
+                table.insert(portalEntries, {
+                    sort = (drop.tier and string.format("%02d", 99 - drop.tier) or "50") .. name,
+                    line = string.format("• **%s ×%s** — %s%s%s%s", name, FormatNumber(amount), cat, rarity, tier, total)
+                })
+            elseif cat:lower():find("charm", 1, true) or cat:lower():find("relic", 1, true)
+                or name:lower():find("charm", 1, true) or name:lower():find("relic", 1, true) then
+                table.insert(charmEntries, {
+                    sort = name,
+                    line = string.format("• **%s ×%s** — %s%s%s%s", name, FormatNumber(amount), cat, rarity, tier, total)
+                })
+            elseif cat == "Unit" then
+                table.insert(unitEntries, {
+                    sort = name,
+                    line = string.format("• **%s ×%s%s** — Unit%s%s", name, FormatNumber(amount), shiny, rarity, total)
+                })
+            else
+                table.insert(itemEntries, {
+                    sort = name,
+                    line = string.format("• **%s ×%s** — %s%s%s%s", name, FormatNumber(amount), cat, rarity, tier, total)
+                })
+            end
         end
+    end
+
+    local function SortAndJoin(entries)
+        table.sort(entries, function(a, b) return a.sort < b.sort end)
+        local lines = {}
+        for _, entry in ipairs(entries) do table.insert(lines, entry.line) end
+        return lines
     end
 
     local sections = {}
-    for _, category in ipairs({"Secret Unit", "Secret Portal"}) do
-        local entries = {}
-        for name, count in pairs(totals[category]) do
-            table.insert(entries, string.format("🌈 **✨ %s ×%d ✨**", name, count))
-        end
-        table.sort(entries)
-        if #entries > 0 then
-            table.insert(sections, "━━━━━━━━━━━━━━━━\n**🚨 💎 " .. string.upper(category) .. " 💎 🚨**\n"
-                .. table.concat(entries, "\n") .. "\n━━━━━━━━━━━━━━━━")
-        end
+    local hasSecrets = #secretEntries > 0
+    if hasSecrets then
+        local lines = SortAndJoin(secretEntries)
+        table.insert(sections, "━━━━━━━━━━━━━━━━\n**🚨 💎 SECRET REWARDS 💎 🚨**\n" .. table.concat(lines, "\n") .. "\n━━━━━━━━━━━━━━━━")
     end
-    if #sections == 0 then return nil end
-    return table.concat(sections, "\n\n")
+    if #portalEntries > 0 then
+        local lines = SortAndJoin(portalEntries)
+        table.insert(sections, "**🌀 Portals**\n" .. table.concat(lines, "\n"))
+    end
+    if #itemEntries > 0 then
+        local lines = SortAndJoin(itemEntries)
+        table.insert(sections, "**🧪 Materials / Items**\n" .. table.concat(lines, "\n"))
+    end
+    if #charmEntries > 0 then
+        local lines = SortAndJoin(charmEntries)
+        table.insert(sections, "**🧿 Charms / Relics**\n" .. table.concat(lines, "\n"))
+    end
+    if #unitEntries > 0 then
+        local lines = SortAndJoin(unitEntries)
+        table.insert(sections, "**⚔️ Units Dropped**\n" .. table.concat(lines, "\n"))
+    end
+
+    local fullDropText = #sections > 0 and table.concat(sections, "\n\n") or "No item or unit drops detected."
+    return fullDropText, hasSecrets
 end
 
 function BuildMatchRewardLines(resultDetails)
@@ -2253,7 +3747,7 @@ function BuildMatchRewardLines(resultDetails)
     local lines = {}
     if type(settings) == "table" then
         local rewardFields = {
-            { key = "xp_reward", label = "XP" },
+            { key = "xp_reward", label = "Player XP" },
             { key = "gold_reward", label = "Gold" },
             { key = "gem_reward", label = "Gems" },
             { key = "trophy_reward", label = "Trophies" },
@@ -2290,7 +3784,7 @@ function BuildMatchRewardLines(resultDetails)
         scroll = scroll and scroll:FindFirstChild("ScrollingFrame")
         if scroll then
             local labels = {
-                GoldReward = "Gold", GemReward = "Gems", TrophyReward = "Trophies", XPReward = "XP",
+                GoldReward = "Gold", GemReward = "Gems", TrophyReward = "Trophies", XPReward = "Player XP",
             }
             for _, frame in ipairs(scroll:GetChildren()) do
                 if frame:IsA("GuiObject") and frame.Visible then
@@ -2306,8 +3800,65 @@ function BuildMatchRewardLines(resultDetails)
         end
     end
 
-    if #lines == 0 then return "No match rewards reported by ResultsUI" end
-    return table.concat(lines, "\n")
+    return #lines > 0 and table.concat(lines, "\n") or nil
+end
+
+function BuildAdditionalResultRewardLines(settings, inventorySnapshot, fallbackInventorySnapshot)
+    if type(settings) ~= "table" then return nil end
+    local sections = {}
+
+    if settings.first_completion then
+        local bonusLines = {}
+        local gems = tonumber(settings.first_completion_gems)
+        local trophies = tonumber(settings.first_completion_trophies)
+        if gems and gems > 0 then
+            table.insert(bonusLines, "• **Gems:** +" .. FormatNumber(gems))
+        end
+        if trophies and trophies > 0 then
+            table.insert(bonusLines, "• **Trophies:** +" .. FormatNumber(trophies))
+        end
+        if #bonusLines > 0 then
+            table.insert(sections, "**⭐ First Completion Bonus**\n" .. table.concat(bonusLines, "\n"))
+        end
+    end
+
+    if type(settings.xp_updates) == "table" then
+        local unitNames = {}
+        for _, snapshot in ipairs({inventorySnapshot or {}, fallbackInventorySnapshot or {}}) do
+            for key, reward in pairs(snapshot) do
+                if type(key) == "string" and key:sub(1, 5) == "unit:" and type(reward) == "table" then
+                    local uuid = key:sub(6)
+                    if not unitNames[uuid] then
+                        unitNames[uuid] = tostring(reward.name or uuid)
+                    end
+                end
+            end
+        end
+
+        local xpLines = {}
+        for uuid, update in pairs(settings.xp_updates) do
+            if type(update) == "table" then
+                local oldXP = tonumber(update.old_xp)
+                local newXP = tonumber(update.new_xp)
+                local gained = oldXP and newXP and (newXP - oldXP) or 0
+                if gained > 0 then
+                    local unitName = unitNames[tostring(uuid)] or ("Unit " .. tostring(uuid):sub(1, 8))
+                    table.insert(xpLines, {
+                        sort = unitName:lower(),
+                        line = "• **" .. unitName .. ":** +" .. FormatNumber(gained) .. " Unit XP",
+                    })
+                end
+            end
+        end
+        table.sort(xpLines, function(a, b) return a.sort < b.sort end)
+        if #xpLines > 0 then
+            local lines = {}
+            for _, entry in ipairs(xpLines) do table.insert(lines, entry.line) end
+            table.insert(sections, "**⚔️ Unit XP**\n" .. table.concat(lines, "\n"))
+        end
+    end
+
+    return #sections > 0 and table.concat(sections, "\n\n") or nil
 end
 
 webhookCurrencyBefore = nil
@@ -2315,8 +3866,8 @@ webhookSecretRewardBefore = nil
 webhookSecretRewardBaselineAvailable = false
 function CaptureWebhookCurrencyBaseline()
     webhookCurrencyBefore = ReadPlayerCurrencies()
-    webhookSecretRewardBefore, webhookSecretRewardBaselineAvailable = ReadSecretRewardSnapshot()
-    return table.clone(webhookCurrencyBefore), webhookSecretRewardBefore, webhookSecretRewardBaselineAvailable
+    webhookSecretRewardBefore, webhookSecretRewardBaselineAvailable = ReadInventoryRewardSnapshot()
+    return SafeCloneTable(webhookCurrencyBefore), webhookSecretRewardBefore, webhookSecretRewardBaselineAvailable
 end
 
 function ReadPlayerLevel()
@@ -2330,7 +3881,6 @@ function ReadPlayerLevel()
             end
         end
     end
-    -- Anime Adventures calculates player level from _stats.player_xp through LevelServiceCore.
     local ok, level = pcall(function()
         local statsFolder = player:FindFirstChild("_stats")
         local xpValue = statsFolder and statsFolder:FindFirstChild("player_xp")
@@ -2347,9 +3897,6 @@ function ReadPlayerLevel()
 end
 
 function ReadMatchUnitLines()
-    -- Keep the webhook compact: one row per unit type, using the highest
-    -- takedown value reached by a single placed copy of that unit.
-    -- Do not add together every duplicate unit placed on the map.
     local units = GetPlayerUnits()
     local grouped = {}
 
@@ -2386,8 +3933,6 @@ function ReadMatchUnitLines()
 end
 
 function ResolveWebhookOutcome(resultDetails)
-    -- Only trust the current ResultsUI controller settings / current result title.
-    -- Never use generic _DATA Won/Victory flags: they can be stale across matches.
     local title = string.upper(tostring(resultDetails and resultDetails.result or ""))
     if title:find("DEFEAT", 1, true) then return "Defeat" end
     if title:find("VICTORY", 1, true) then return "Victory" end
@@ -2399,103 +3944,163 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     local problem = WebhookProblem(url)
     if problem then
         warn("[Octoput Hub Webhook] " .. problem)
-        return false
+        return false, problem
     end
 
-    -- game_finished calls ResultsUI.show_results(settings). Wait for that exact
-    -- settings payload to become available before reading the match result.
-    local resultDetails
-    for attempt = 1, 12 do
+    print("[Octoput Hub Webhook] Preparing match-end payload...")
+
+    -- Fast result check: poll every 0.1s up to 6 times (0.6s max)
+    -- As soon as we have authoritative settings OR a definitive VICTORY/DEFEAT result, break immediately!
+    local resultDetails = {}
+    for attempt = 1, 6 do
         local currentSettings = ReadAuthoritativeResultSettings()
         if currentSettings and currentSettings ~= webhookResultSettingsAtStart then
             resultDetails = GetResultDetails()
             if resultDetails.authoritative then break end
         end
-        task.wait(0.5)
+        local currentDetails = GetResultDetails()
+        if currentDetails and currentDetails.result and currentDetails.result ~= "" and currentDetails.result ~= webhookResultTitleAtStart then
+            resultDetails = currentDetails
+            break
+        end
+        task.wait(0.1)
     end
     resultDetails = resultDetails or GetResultDetails()
-    -- If no fresh server result payload appeared, do not reuse a previous run's
-    -- victory/defeat title from a still-open ResultsUI.
-    if not resultDetails.authoritative and resultDetails.result == webhookResultTitleAtStart then
-        resultDetails.result = nil
-    end
     local outcome = ResolveWebhookOutcome(resultDetails)
 
-    local secretRewardText
-    if secretBaselineAvailable then
-        local secretRewardsAfter, secretRewardsAvailable = ReadSecretRewardSnapshot()
-        if secretRewardsAvailable then
-            secretRewardText = BuildSecretRewardLines(secretBaseline, secretRewardsAfter)
-        end
+    -- Quick inventory snapshot: 3 attempts at 0.1s (0.3s max)
+    local inventoryRewardsAfter, inventoryRewardsAvailable, invProfAfter, colProfAfter
+    for attempt = 1, 3 do
+        inventoryRewardsAfter, inventoryRewardsAvailable, invProfAfter, colProfAfter = ReadInventoryRewardSnapshot()
+        if inventoryRewardsAvailable then break end
+        task.wait(0.1)
     end
 
-    local unitLines = unitLinesSnapshot or ReadMatchUnitLines()
-    local playerStatsText = BuildPlayerStatsText(ReadPlayerCurrencies())
-    local playerLevel = ReadPlayerLevel()
+    -- Collect all drops from settings and inventory diff
+    local allDrops = CollectAllMatchDrops(
+        resultDetails and resultDetails.settings,
+        secretBaseline,
+        inventoryRewardsAfter,
+        invProfAfter,
+        colProfAfter
+    )
+    local dropText, hasSecretDrop = BuildCategorizedDropFields(allDrops)
+
     local currentCurrencies = ReadPlayerCurrencies()
-    local xp = currentCurrencies.XP or 0
+    local playerStatsText = BuildPlayerStatsText(currentCurrencies, currencyBaseline)
     local matchTime = resultDetails.Timer or "Unknown"
     local waveText = resultDetails.WavesCompleted or "Unknown"
-    local stageText = tostring(resultDetails.level or "Unknown stage")
-    local outcomeLabel = outcome == "Victory" and "🟩 **VICTORY**"
-        or (outcome == "Defeat" and "🟥 **DEFEAT**" or "⚪ **UNKNOWN RESULT**")
-    local matchResultText = outcomeLabel .. " — Total Time: " .. tostring(matchTime)
-        .. " — Waves Completed: " .. tostring(waveText) .. " — " .. stageText
-    local rewardText = BuildMatchRewardLines(resultDetails)
+    local stageText = tostring(resultDetails.level or ReadCurrentStageName() or "Unknown stage")
 
-    local function LimitEmbedText(value, limit)
-        value = tostring(value or "")
+    local matchInfoLines = {
+        "• **Stage:** " .. stageText,
+        "• **Waves Completed:** " .. tostring(waveText),
+        "• **Time Taken:** " .. tostring(matchTime),
+    }
+    local matchInfoText = table.concat(matchInfoLines, "\n")
+
+    local stageRewardText = BuildMatchRewardLines(resultDetails) or "No standard rewards reported"
+    local additionalRewardText = BuildAdditionalResultRewardLines(
+        resultDetails and resultDetails.settings,
+        inventoryRewardsAvailable and inventoryRewardsAfter or nil,
+        secretBaseline
+    )
+
+    local unitLines = unitLinesSnapshot or ReadMatchUnitLines()
+
+    -- Safe embed limiter: never allows empty string and avoids broken multi-byte UTF-8 slices
+    local function SafeLimitText(value, limit)
+        value = tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
+        if value == "" then return "None" end
         if #value <= limit then return value end
-        return value:sub(1, math.max(1, limit - 18)) .. "\n… (truncated)"
+        local truncated = value:sub(1, math.max(1, limit - 20))
+        local lastNl = truncated:match(".*()\n")
+        if lastNl and lastNl > 40 then
+            truncated = truncated:sub(1, lastNl - 1)
+        end
+        return truncated .. "\n… (truncated)"
     end
 
-    local description = string.format(
-        "**User:** %s **Level:** %s (XP: %s)\n\n**💰 Player Stats**\n%s\n\n**⚔️ Units**\n%s\n\n**🏁 Match Result**\n%s\n\n[Octoput Hub Logo](https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png)",
-        player.Name, playerLevel and FormatNumber(playerLevel) or "Unknown", FormatNumber(xp),
-        playerStatsText, unitLines, matchResultText)
+    local fields = {
+        {
+            name = "📊 Player Stats",
+            value = SafeLimitText(playerStatsText, 1000),
+            inline = false,
+        },
+        {
+            name = "⏱️ Match Info",
+            value = SafeLimitText(matchInfoText, 500),
+            inline = true,
+        },
+        {
+            name = "🎁 Stage Rewards",
+            value = SafeLimitText(stageRewardText, 500),
+            inline = true,
+        },
+        {
+            name = "🎒 Dropped Items & Units",
+            value = SafeLimitText(dropText, 1024),
+            inline = false,
+        },
+    }
 
-    local fields = {{
-        name = "🎁 Match Rewards",
-        value = LimitEmbedText(rewardText, 900),
-        inline = false,
-    }}
-    -- Show this section only when a new Secret Unit or Secret Portal was found.
-    if secretRewardText then
+    if additionalRewardText and tostring(additionalRewardText):gsub("%s+", "") ~= "" then
         table.insert(fields, {
-            name = "🚨 SECRET REWARDS 🚨",
-            value = LimitEmbedText(secretRewardText, 900),
+            name = "📈 Additional Rewards",
+            value = SafeLimitText(additionalRewardText, 800),
             inline = false,
         })
     end
 
-    local body = HttpService:JSONEncode({
+    if unitLines and unitLines ~= "No placed unit stats found" and tostring(unitLines):gsub("%s+", "") ~= "" then
+        table.insert(fields, {
+            name = "⚔️ Placed Units Performance",
+            value = SafeLimitText(unitLines, 800),
+            inline = false,
+        })
+    end
+
+    local embedTitle = outcome == "Victory" and ("🏆 VICTORY — " .. stageText)
+        or (outcome == "Defeat" and ("💀 DEFEAT — " .. stageText) or ("🏁 MATCH RESULT — " .. stageText))
+    local embedColor = outcome == "Victory" and 3066993
+        or (outcome == "Defeat" and 15158332 or 9807270)
+
+    local mentionContent = hasSecretDrop and "🚨 **SECRET DROP DETECTED!** 🚨" or nil
+
+    local bodyTable = {
         username = "Octoput Hub",
+        content = mentionContent,
         embeds = {{
-            title = outcome == "Victory" and "Anime Adventures — 🏆 VICTORY"
-                or (outcome == "Defeat" and "Anime Adventures — DEFEAT" or "Anime Adventures — MATCH RESULT"),
-            description = LimitEmbedText(description, 2400),
-            color = outcome == "Victory" and 5763719
-                or (outcome == "Defeat" and 15548997 or 9807270),
-            image = { url = "https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png" },
+            title = embedTitle,
+            color = embedColor,
             fields = fields,
+            thumbnail = { url = "https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png" },
+            footer = { text = "Octoput Hub Webhook • " .. player.Name },
             timestamp = DateTime.now():ToIsoDate(),
         }},
-    })
+    }
+    local body = HttpService:JSONEncode(bodyTable)
 
+    print("[Octoput Hub Webhook] Sending match result to Discord...")
     local lastError = "Unknown HTTP error"
-    for attempt = 1, 3 do
+    local retryDelay
+    for attempt = 1, 4 do
         local ok, response = pcall(HttpPost, url, body)
-        local success, message = DescribeWebhookResult(ok, response)
+        local success, message, responseRetryAfter = DescribeWebhookResult(ok, response)
         if success then
-            print("[Octoput Hub Webhook] End-of-match notification sent.")
+            print("[Octoput Hub Webhook] Notification successfully delivered to Discord!")
             return true
         end
         lastError = message
-        warn("[Octoput Hub Webhook] Attempt " .. tostring(attempt) .. " failed: " .. tostring(message))
-        if attempt < 3 then task.wait(attempt * 2) end
+        retryDelay = responseRetryAfter or math.min(attempt * 2, 8)
+        warn("[Octoput Hub Webhook] Attempt " .. tostring(attempt) .. "/4 failed: " .. tostring(message))
+        if attempt < 4 then
+            print("[Octoput Hub Webhook] Retrying in " .. tostring(retryDelay) .. "s.")
+            task.wait(retryDelay)
+        end
     end
-    warn("[Octoput Hub Webhook] Giving up after 3 attempts: " .. tostring(lastError))
-    return false
+    warn("[Octoput Hub Webhook] Giving up after 4 attempts: " .. tostring(lastError))
+    return false, lastError, retryDelay
 end
 
 function IsGoodEffectColor(color)
@@ -2949,7 +4554,7 @@ function CreateTextBox(parent, title, placeholder, layoutOrder, onChanged, initi
 
     Input.FocusLost:Connect(function()
         if onChanged then
-            onChanged(Input.Text)
+            pcall(onChanged, Input.Text)
         end
     end)
 
@@ -3273,7 +4878,7 @@ PortalPage = CreateTab("Portal", 3)
 EventPage = CreateTab("Event", 4)
 WebhookPage = CreateTab("Webhook", 5)
 MiscPage = CreateTab("Misc", 6)
-SummonPage = CreateTab("Snipe Summon", 7)
+SummonPage = CreateTab("Summon", 7)
 
 tabs["Auto Play"].Page.Visible = true
 tabs["Auto Play"].Button.BackgroundColor3 = Color3.fromRGB(0, 168, 255)
@@ -3284,6 +4889,41 @@ CreateToggle(MainPage, "Auto Start", "AutoStart", 1)
 CreateToggle(MainPage, "Auto Replay", "MainAutoReplay", 2)
 CreateToggle(MainPage, "Auto Next", "AutoNext", 3)
 CreateToggle(MainPage, "Auto Leave", "AutoLeave", 4)
+
+-- Manual Return to Lobby button, using the game's own flow (party confirmation
+-- and private-server destination prompt are handled by TeleportServiceClient).
+returningToLobby = false
+CreateButton(MainPage, "Return to Lobby", 5, function()
+    if returningToLobby then
+        return
+    end
+    returningToLobby = true
+
+    local ok, err = pcall(function()
+        local srcFolder = ReplicatedStorage:FindFirstChild("src")
+        local loaderModule = srcFolder and srcFolder:FindFirstChild("Loader")
+        if not loaderModule then
+            error("Anime Adventures Loader module is unavailable")
+        end
+
+        local Loader = require(loaderModule)
+        local TeleportServiceClient = Loader.load_client_service(game, "TeleportServiceClient")
+        if not TeleportServiceClient or type(TeleportServiceClient.back_to_lobby) ~= "function" then
+            error("TeleportServiceClient.back_to_lobby is unavailable")
+        end
+
+        TeleportServiceClient.back_to_lobby()
+    end)
+
+    if not ok then
+        returningToLobby = false
+        warn("[OctoputHub] Return to Lobby failed: " .. tostring(err))
+    else
+        task.delay(5, function()
+            returningToLobby = false
+        end)
+    end
+end)
 
 AutoPlayStatusCard = Instance.new("Frame")
 AutoPlayStatusCard.Size = UDim2.new(1, -10, 0, 38)
@@ -3325,23 +4965,22 @@ end, function(value)
 end)
 CreateToggle(AutoPlayPage, "Auto Upgrade Units", "AutoUpgrade", 3)
 CreateToggle(AutoPlayPage, "Auto Upgrade Farm First", "AutoUpgradeFarmFirst", 4)
-CreateSection(AutoPlayPage, "Infinity Buff", 5)
-CreateToggle(AutoPlayPage, "Infinity Buff (100% Loop)", "InfinityBuff", 6)
-CreateHint(AutoPlayPage, "Auto rotates buffer active skills (Elfy, Commander, Windsong) with 0s downtime to keep a permanent 100% buff loop.", 7, 34)
-CreateToggle(AutoPlayPage, "  > Loop Elfy (Sylph) [Magic]", "InfinityBuffElfy", 8)
-CreateToggle(AutoPlayPage, "  > Loop Commander (Erwin) [Phys]", "InfinityBuffCommander", 9)
-CreateToggle(AutoPlayPage, "  > Loop Windsong (Wendy) [Magic]", "InfinityBuffWindsong", 10)
-InfinityBuffStatus = CreateHint(AutoPlayPage, "Infinity Buff Status: Idle", 11, 28)
-
-function UpdateInfinityBuffStatus(text, color)
-    if InfinityBuffStatus then
-        InfinityBuffStatus.Text = "Infinity Buff: " .. text
-        if color then
-            InfinityBuffStatus.TextColor3 = color
-        end
+CreateSection(AutoPlayPage, "Infinity Buff Rotation", 5)
+CreateHint(AutoPlayPage, "Infinity Buff (100% Loop): Event-driven + attribute drop & escalation detection for 0-downtime 100% buff loop. Dynamically adapts to curse ratio, auto-scales 25% -> 56% -> 95% -> 100%, and verifies buffer unit distance.", 6, 42)
+BuffRotationStatus = CreateHint(AutoPlayPage, "Infinity Buff: Disabled", 7, 36)
+CreateToggle(AutoPlayPage, "Infinity Buff (100% Loop)", "AutoBuffRotation", 8, function(enabled)
+    State.InfinityBuff = enabled
+    State.AutoBuffRotation = enabled
+    if not enabled then
+        SetBuffRotationStatus("Infinity Buff: Disabled", Color3.fromRGB(160, 160, 180))
+    else
+        SetBuffRotationStatus("Infinity Buff: Detecting placed buff units...", Color3.fromRGB(100, 190, 255))
     end
-end
-
+end)
+CreateToggle(AutoPlayPage, "  > Loop Elfy (Sylph) [Magic]", "InfinityBuffElfy", 9)
+CreateToggle(AutoPlayPage, "  > Loop Commander (Erwin) [Phys]", "InfinityBuffCommander", 10)
+CreateToggle(AutoPlayPage, "  > Loop Windsong (Wendy) [Magic]", "InfinityBuffWindsong", 11)
+CreateToggle(AutoPlayPage, "  > Loop Generic / Hybrid Buffers", "InfinityBuffHybrid", 12)
 CreateSection(AutoPlayPage, "Hybrid Units", 22)
 CreateHint(AutoPlayPage, "Hybrid units can stand on Ground or Hill. Both options keep the current placement behavior.", 23, 28)
 CreateToggle(AutoPlayPage, "Place on Ground", "PlaceHybridGround", 24)
@@ -3601,7 +5240,7 @@ end
 -- Portal page: inventory-based portal types + game-defined tier selection.
 PortalSelectionContainer = Instance.new("Frame")
 PortalSelectionContainer.Name = "PortalSelectionContainer"
-PortalSelectionContainer.Size = UDim2.new(1, -10, 0, 174)
+PortalSelectionContainer.Size = UDim2.new(1, -10, 0, 410)
 PortalSelectionContainer.BackgroundTransparency = 1
 PortalSelectionContainer.LayoutOrder = 1
 PortalSelectionContainer.ZIndex = 12
@@ -3637,10 +5276,18 @@ function CreatePortalSelectionColumn(name, title, hint, order)
 
     local list = Instance.new("ScrollingFrame")
     list.Name = name .. "List"
-    list.Size = UDim2.new(1, -4, 0, 116)
+    -- Preserve a useful physical viewing area when the whole hub is scaled.
+    -- Tier list is tall enough to show every game-defined tier without clipping.
+    local visibleHeight = name == "PortalTierColumn" and 350 or 160
+    list.Size = UDim2.new(1, -4, 0, visibleHeight / math.max(HubScale.Scale, 0.01))
     list.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
     list.BorderSizePixel = 0
-    list.ScrollBarThickness = 3
+    list.ScrollBarThickness = 4
+    list.ScrollingDirection = Enum.ScrollingDirection.Y
+    list.ScrollingEnabled = true
+    list.Active = true
+    list.ClipsDescendants = true
+    list.AutomaticCanvasSize = Enum.AutomaticSize.Y
     list.CanvasSize = UDim2.new(0, 0, 0, 0)
     list.LayoutOrder = 3
     list.ZIndex = 12
@@ -3674,44 +5321,33 @@ PortalTierList = CreatePortalSelectionColumn(
     2
 )
 
+-- Recalculate the portal selector's physical height whenever UI Scale or the
+-- game viewport changes. The Portal page itself remains scrollable on short screens.
+function ApplyResponsiveGuiSizing()
+    if not PortalSelectionContainer or not PortalInventoryList or not PortalTierList then
+        return
+    end
+    local scale = math.max(HubScale.Scale, 0.01)
+    -- Match the Event Buff/Debuff priority editor's scroll behavior.
+    local inventoryHeight = 160 / scale
+    local tierHeight = 350 / scale
+    PortalInventoryList.Size = UDim2.new(1, -4, 0, inventoryHeight)
+    PortalTierList.Size = UDim2.new(1, -4, 0, tierHeight)
+    PortalSelectionContainer.Size = UDim2.new(1, -10, 0, math.max(inventoryHeight, tierHeight) + 54)
+end
+ApplyResponsiveGuiSizing()
+
 PortalStatus = CreateHint(PortalPage, "Portal inventory: waiting for refresh.", 2, 30)
 PortalRefreshButton = CreateButton(PortalPage, "Refresh Portal Inventory", 3, function() end)
 PortalRefreshButton.BackgroundColor3 = Color3.fromRGB(0, 168, 255)
 
-function FindLocalInventoryProfile()
-    if type(getgc) ~= "function" then return nil end
-    local ok, objects = pcall(getgc, true)
-    if not ok or type(objects) ~= "table" then return nil end
-    for _, object in ipairs(objects) do
-        if type(object) == "table" and type(object.inventory) == "table" then
-            local profile = object.inventory.inventory_profile_data
-            if type(profile) == "table" and type(profile.unique_items) == "table" then
-                return profile
-            end
-        end
-    end
-    for _, object in ipairs(objects) do
-        if type(object) == "table" then
-            local profile = object.inventory_profile_data
-            if type(profile) == "table" and type(profile.unique_items) == "table" then
-                return profile
-            end
-        end
-    end
-    return nil
-end
+-- Game session and inventory profile are provided globally by FindLocalGameSession() and FindLocalInventoryProfile() above.
 
 function GetOwnedPortals()
     local profile = FindLocalInventoryProfile()
     local portals, seen = {}, {}
     if not profile then return portals, "Inventory session not found (executor getgc support required)." end
-    local itemData = nil
-    pcall(function()
-        local itemsModule = ReplicatedStorage:FindFirstChild("Items", true)
-        if itemsModule and itemsModule:IsA("ModuleScript") then
-            itemData = require(itemsModule)
-        end
-    end)
+    local itemData = LoadGameDataModule("Items")
     for _, owned in pairs(profile.unique_items) do
         if type(owned) == "table" and type(owned.uuid) == "string" and type(owned.item_id) == "string" then
             local def = itemData and itemData[owned.item_id]
@@ -3734,6 +5370,7 @@ end
 
 portalInventoryCache = {}
 function RefreshPortalTierUI()
+    PortalTierList.CanvasPosition = Vector2.new(0, 0)
     for _, child in ipairs(PortalTierList:GetChildren()) do
         if child:IsA("TextButton") then child:Destroy() end
     end
@@ -3763,6 +5400,7 @@ function RefreshPortalTierUI()
 end
 
 function RefreshPortalUI()
+    PortalInventoryList.CanvasPosition = Vector2.new(0, 0)
     for _, child in ipairs(PortalInventoryList:GetChildren()) do
         if child:IsA("TextButton") then child:Destroy() end
     end
@@ -3798,6 +5436,7 @@ end
 RefreshPortalTierUI()
 PortalRefreshButton.MouseButton1Click:Connect(RefreshPortalUI)
 CreateToggle(PortalPage, "Auto Open Portal", "AutoOpenPortal", 4)
+CreateToggle(PortalPage, "Auto Next Portal (Win / Lose)", "AutoNextPortal", 5)
 
 portalOpenBusy = false
 portalLastRefresh = 0
@@ -3963,12 +5602,16 @@ CreateButton(WebhookPage, "Test Webhook", 4, function()
     local url = NormalizeWebhookUrl(State.WebhookURL)
     local problem = WebhookProblem(url)
     if problem then
-        WebhookStatus.Text = "Failed: " .. problem
-        WebhookStatus.TextColor3 = Color3.fromRGB(255, 120, 120)
+        if WebhookStatus then
+            WebhookStatus.Text = "Failed: " .. problem
+            WebhookStatus.TextColor3 = Color3.fromRGB(255, 120, 120)
+        end
         return
     end
-    WebhookStatus.Text = "Sending test message..."
-    WebhookStatus.TextColor3 = Color3.fromRGB(255, 200, 70)
+    if WebhookStatus then
+        WebhookStatus.Text = "Sending test message..."
+        WebhookStatus.TextColor3 = Color3.fromRGB(255, 200, 70)
+    end
     local body = HttpService:JSONEncode({
         username = "Octoput Hub",
         embeds = {{
@@ -3981,11 +5624,17 @@ CreateButton(WebhookPage, "Test Webhook", 4, function()
     local ok, result = pcall(HttpPost, url, body)
     local success, message = DescribeWebhookResult(ok, result)
     if success then
-        WebhookStatus.Text = "Success: " .. message
-        WebhookStatus.TextColor3 = Color3.fromRGB(100, 255, 140)
+        if WebhookStatus then
+            WebhookStatus.Text = "Success: " .. message
+            WebhookStatus.TextColor3 = Color3.fromRGB(100, 255, 140)
+        end
+        print("[Octoput Hub Webhook Test] Success: " .. tostring(message))
     else
-        WebhookStatus.Text = "Failed: " .. message
-        WebhookStatus.TextColor3 = Color3.fromRGB(255, 120, 120)
+        if WebhookStatus then
+            WebhookStatus.Text = "Failed: " .. message
+            WebhookStatus.TextColor3 = Color3.fromRGB(255, 120, 120)
+        end
+        warn("[Octoput Hub Webhook Test] Failed: " .. tostring(message))
     end
 end)
 WebhookStatus = CreateHint(WebhookPage, "Test result appears here.", 5, 48)
@@ -4003,7 +5652,7 @@ CreateSingleSlider(MiscPage, "UI Scale", "50% smaller    150% larger", 6, 50, 15
     return math.floor(State.UIScale * 100 + 0.5)
 end, function(value)
     State.UIScale = math.clamp(value / 100, 0.5, 1.5)
-    HubScale.Scale = State.UIScale
+    ApplyHubScale()
 end)
 
 farmStall = { count = 0, lastChange = 0 }
@@ -4224,12 +5873,156 @@ function TryAutoStart()
     end
 end
 
+
+-- Auto Next Portal follows the game's ResultsUI replay flow. For portal levels,
+-- the official NextRetry button sends set_game_finished_vote("replay", {item_uuid})
+-- after LevelServiceCore validates that the replacement portal belongs to the same group.
+function GetAutoNextPortalCandidate()
+    local session = FindLocalGameSession()
+    local profile = session and session.inventory and session.inventory.inventory_profile_data
+    local uniqueItems = profile and profile.unique_items
+    if type(uniqueItems) ~= "table" then
+        return nil, "Inventory session not found", false
+    end
+
+    local loaderModule
+    local loaderOk = pcall(function()
+        loaderModule = require(ReplicatedStorage:WaitForChild("src"):WaitForChild("Loader"))
+    end)
+    local levelData = loaderOk and type(loaderModule) == "table" and loaderModule.LevelData or nil
+    if type(levelData) ~= "table" or levelData._is_map_or_portal_level ~= true then
+        return nil, "Current stage is not a portal", false
+    end
+    if tonumber(levelData._owner_player_userid) ~= player.UserId then
+        return nil, "Only the portal owner can choose the next portal", true
+    end
+
+    local portalGroup = levelData.portal_group
+    if type(portalGroup) ~= "string" or portalGroup == "" then
+        return nil, "Current portal group could not be identified", true
+    end
+
+    local items = LoadGameDataModule("Items")
+    local levels = LoadGameDataModule("Levels")
+    if type(items) ~= "table" or type(levels) ~= "table" then
+        return nil, "Portal game data unavailable", true
+    end
+
+    local currentUUID = levelData._portal_item_uuid or levelData._portal_uuid
+    local candidates = {}
+    for _, owned in pairs(uniqueItems) do
+        if type(owned) ~= "table" or type(owned.uuid) ~= "string"
+            or owned.uuid == currentUUID or portalOpenedUUIDs[owned.uuid] then
+            continue
+        end
+
+        local def = type(owned.item_id) == "string" and items[owned.item_id] or nil
+        if not def or def.item_group ~= "Portals" then
+            continue
+        end
+
+        local itemGroup
+        if type(def.static_portal_copy_to_level_params) == "table" then
+            itemGroup = def.static_portal_copy_to_level_params.portal_group
+        else
+            local usage = def.usage
+            local levelId = type(usage) == "table" and usage.level_id or nil
+            local uniqueData = owned._unique_item_data
+            if def._unique_portal and type(uniqueData) == "table"
+                and type(uniqueData._unique_portal_data) == "table" then
+                levelId = uniqueData._unique_portal_data.level_id or levelId
+            end
+            local portalLevel = levelId and levels[levelId]
+            itemGroup = portalLevel and portalLevel.portal_group
+        end
+        if itemGroup ~= portalGroup then
+            continue
+        end
+
+        local uniqueData = owned._unique_item_data
+        local tries = type(uniqueData) == "table" and tonumber(uniqueData._portal_tries) or nil
+        local maxTries = type(uniqueData) == "table" and tonumber(uniqueData._portal_max_tries) or tonumber(def._portal_max_tries)
+        local hasRemainingTries = def._portal_infinite_lives == true
+            or (tries ~= nil and maxTries ~= nil and tries < maxTries)
+        if not hasRemainingTries then
+            continue
+        end
+
+        local portalData = type(uniqueData) == "table" and uniqueData._unique_portal_data or nil
+        local tier = tonumber(portalData and portalData.portal_depth) or 0
+        if State.SelectedPortalTypes[owned.item_id] and State.SelectedPortalTiers[tostring(tier)] then
+            table.insert(candidates, {
+                uuid = owned.uuid,
+                itemId = owned.item_id,
+                tier = tier,
+                name = tostring(def.name or owned.item_id),
+            })
+        end
+    end
+
+    table.sort(candidates, function(a, b)
+        if a.tier == b.tier then return a.name < b.name end
+        return a.tier > b.tier
+    end)
+    return candidates[1], #candidates == 0 and "No other matching portal is available" or nil, true
+end
+
 function HandleMatchEnd(gameFinished)
     if not gameFinished or gameFinished.Value ~= true then
         matchEndHandled = false
         return
     end
     if matchEndHandled then
+        return
+    end
+
+    -- Trigger webhook immediately if not already fired
+    if State.WebhookOnEnd and not webhookEndDetected then
+        MarkWebhookEnd("HandleMatchEnd")
+    end
+
+    -- Helper to wait for webhook completion before transitioning maps
+    local function AwaitWebhookBeforeAction()
+        if State.WebhookOnEnd and not webhookSent then
+            local waitStart = os.clock()
+            while not webhookSent and webhookSending and (os.clock() - waitStart < 4.5) do
+                task.wait(0.1)
+            end
+            task.wait(0.2)
+        else
+            task.wait(2.0)
+        end
+    end
+
+    -- Portal Auto Next uses the same result-screen replay flow as the game itself.
+    -- It works after both Victory and Defeat and only for the portal owner.
+    local nextPortal, nextPortalReason, isPortalLevel
+    if State.AutoNextPortal then
+        nextPortal, nextPortalReason, isPortalLevel = GetAutoNextPortalCandidate()
+    end
+    if State.AutoNextPortal and isPortalLevel then
+        matchEndHandled = true
+        task.spawn(function()
+            AwaitWebhookBeforeAction()
+            if not gameFinished.Parent or gameFinished.Value ~= true then return end
+            if nextPortal then
+                portalOpenedUUIDs[nextPortal.uuid] = true
+                local ok, result = pcall(function()
+                    return InvokeEndpoint("set_game_finished_vote", "replay", { item_uuid = nextPortal.uuid })
+                end)
+                if not ok or result == false then
+                    portalOpenedUUIDs[nextPortal.uuid] = nil
+                    UpdateEventStatus("Auto Next Portal: Replay request failed", Color3.fromRGB(255, 100, 100))
+                else
+                    UpdateEventStatus(string.format("Auto Next Portal: Selecting %s (T%d)...", nextPortal.name, nextPortal.tier), Color3.fromRGB(70, 200, 255))
+                end
+            elseif nextPortalReason == "No other matching portal is available" and State.AutoOpenPortal then
+                UpdateEventStatus("Auto Next Portal: No matching portal; returning to Lobby for Auto Open Portal...", Color3.fromRGB(255, 170, 0))
+                InvokeEndpoint("teleport_back_to_lobby")
+            else
+                UpdateEventStatus("Auto Next Portal: " .. tostring(nextPortalReason or "No valid portal found"), Color3.fromRGB(255, 170, 0))
+            end
+        end)
         return
     end
 
@@ -4257,7 +6050,7 @@ function HandleMatchEnd(gameFinished)
 
     matchEndHandled = true
     task.spawn(function()
-        task.wait(2.5)
+        AwaitWebhookBeforeAction()
         if not gameFinished.Parent or gameFinished.Value ~= true then
             return
         end
@@ -4317,7 +6110,7 @@ pcall(function()
     end)
 end)
 
--- [[ SNIPE SUMMON ]] --
+-- [[ SUMMON ]] --
 -- Watches the selected live banner and stops as soon as a newly obtained target unit is detected.
 SnipeRuntime = { Running = false, StopReason = "Idle", LastAction = "" }
 SnipeBannerOptions = {}
@@ -4535,25 +6328,39 @@ function SnipeBuildUnitList()
         SnipeMakeLabel(SnipeUnitList, "No unit IDs were found in this banner's data.", 1, 30, Color3.fromRGB(235, 170, 100))
     end
     local count = 0
-    for _, enabled in pairs(State.SnipeTargets) do if enabled then count += 1 end end
+    for _, enabled in pairs(State.SnipeTargets) do if enabled then count = count + 1 end end
     if SnipeTargetCountLabel then SnipeTargetCountLabel.Text = "Selected targets: " .. count end
 end
 
 local function SnipeFindOwnedUnits()
+    local session = FindLocalGameSession()
+    if session then
+        local collection = session.collection
+        local profile = type(collection) == "table" and collection.collection_profile_data
+        if type(profile) == "table" and type(profile.owned_units) == "table" then
+            return profile.owned_units
+        end
+    end
+
+    -- Fallback for executor environments where the GUIService session is not exposed.
     if type(getgc) ~= "function" then return nil end
     local ok, objects = pcall(getgc, true)
     if not ok or type(objects) ~= "table" then return nil end
     for _, object in ipairs(objects) do
         if type(object) == "table" then
-            local collection = object.collection
-            if type(collection) == "table" and collection.player == player then
-                local profile = collection.collection_profile_data
-                if type(profile) == "table" and type(profile.owned_units) == "table" then
-                    return profile.owned_units
+            local candidates = { object, object.session }
+            for _, candidate in ipairs(candidates) do
+                if type(candidate) == "table" and candidate.player == player then
+                    local collection = candidate.collection
+                    local profile = type(collection) == "table" and collection.collection_profile_data
+                    if type(profile) == "table" and type(profile.owned_units) == "table" then
+                        return profile.owned_units
+                    end
+                    profile = candidate.collection_profile_data
+                    if type(profile) == "table" and type(profile.owned_units) == "table" then
+                        return profile.owned_units
+                    end
                 end
-            end
-            if object.player == player and type(object.collection_profile_data) == "table" and type(object.collection_profile_data.owned_units) == "table" then
-                return object.collection_profile_data.owned_units
             end
         end
     end
@@ -4590,17 +6397,17 @@ local function SnipeStop(reason)
     SnipeRuntime.Running = false
     SnipeRuntime.StopReason = reason or "Stopped"
     SnipeSetStatus(SnipeRuntime.StopReason, Color3.fromRGB(235, 180, 100))
-    if SnipeStartButton then SnipeStartButton.Text = "Start Snipe Summon" end
+    if SnipeStartButton then SnipeStartButton.Text = "Start Summon" end
 end
 
 local function SnipeStart()
     if SnipeRuntime.Running then SnipeStop("Stopped by user") return end
     if State.SnipeBanner == "" then SnipeSetStatus("Select a banner first", Color3.fromRGB(235, 100, 100)) return end
-    if not workspace:FindFirstChild("_shop") then SnipeSetStatus("Snipe Summon is available in the lobby only", Color3.fromRGB(235, 100, 100)) return end
+    if not workspace:FindFirstChild("_shop") then SnipeSetStatus("Summon is available in the lobby only", Color3.fromRGB(235, 100, 100)) return end
 
     local selectedBanner = State.SnipeBanner
     local targetCount = 0
-    for _, enabled in pairs(State.SnipeTargets) do if enabled then targetCount += 1 end end
+    for _, enabled in pairs(State.SnipeTargets) do if enabled then targetCount = targetCount + 1 end end
     if targetCount == 0 then SnipeSetStatus("Select at least one target unit", Color3.fromRGB(235, 100, 100)) return end
 
     local owned = SnipeFindOwnedUnits()
@@ -4660,65 +6467,94 @@ local function SnipeStart()
 
     SnipeRuntime.Running = true
     SnipeRuntime.StopReason = "Running"
-    if SnipeStartButton then SnipeStartButton.Text = "Stop Snipe Summon" end
+    if SnipeStartButton then SnipeStartButton.Text = "Stop Summon" end
     SnipeSetStatus("Watching " .. selectedBanner .. " | " .. currencyLabel .. " | Targets: " .. targetCount, Color3.fromRGB(100, 220, 160))
 
     task.spawn(function()
+        local launchedSummons = 0
         while SnipeRuntime.Running do
             if not player.Parent then SnipeStop("Player unavailable") break end
-
-            local currentBalance = tonumber(currencyStat.Value) or 0
-            local spent = math.max(0, startingBalance - currentBalance)
-            if currencyLimit > 0 and spent + estimatedCost > currencyLimit then
-                SnipeStop(currencyLabel .. " limit reached (spent " .. spent .. ")")
-                break
-            end
-            if currentBalance < estimatedCost then
-                SnipeStop("Not enough " .. currencyLabel .. " for next summon")
-                break
-            end
 
             local liveUnits = SnipeGetBannerUnitData(selectedBanner)
             if not liveUnits then
                 SnipeSetStatus("Waiting for selected banner data...", Color3.fromRGB(235, 180, 100))
-                task.wait(5)
+                task.wait(2)
             else
-                local ok, result = pcall(function()
-                    -- The game's BuyOne / BuyTen buttons use these same modes for all
-                    -- banners; the selected banner's Data.Banners entry determines cost.
-                    return remote:InvokeServer(selectedBanner, summonMode)
-                end)
-                if not ok then
-                    SnipeStop("Summon request failed: " .. tostring(result))
+                -- Reserve each launched request so parallel calls cannot exceed
+                -- the starting balance or the configured Currency Limit.
+                local currentBalance = tonumber(currencyStat.Value) or 0
+                local reservedCost = launchedSummons * estimatedCost
+                local safeBalance = math.min(currentBalance, math.max(0, startingBalance - reservedCost))
+                local safeLimit = currencyLimit > 0 and math.max(0, currencyLimit - reservedCost) or math.huge
+                local batchSize = math.min(5, math.floor(safeBalance / estimatedCost), math.floor(safeLimit / estimatedCost))
+
+                if batchSize <= 0 then
+                    if currencyLimit > 0 and reservedCost >= currencyLimit then
+                        SnipeStop(currencyLabel .. " limit reached (reserved " .. reservedCost .. ")")
+                    else
+                        SnipeStop("Not enough " .. currencyLabel .. " for next summon")
+                    end
                     break
                 end
 
-                SnipeSetStatus("Summon request sent | " .. currencyLabel .. " spent: " ..
-                    math.max(0, startingBalance - (tonumber(currencyStat.Value) or 0)),
+                local batch = { done = 0, failed = nil }
+                for requestIndex = 1, batchSize do
+                    launchedSummons = launchedSummons + 1
+                    task.spawn(function()
+                        local ok, result = pcall(function()
+                            -- Match the game's BuyOne / BuyTen modes, dispatched
+                            -- as five independent requests running concurrently.
+                            return remote:InvokeServer(selectedBanner, summonMode)
+                        end)
+                        if not ok and not batch.failed then
+                            batch.failed = tostring(result)
+                        end
+                        batch.done = batch.done + 1
+                    end)
+                end
+
+                SnipeSetStatus("Sending " .. batchSize .. " parallel summon request(s) | " ..
+                    currencyLabel .. " reserved: " .. (launchedSummons * estimatedCost),
                     Color3.fromRGB(100, 190, 255))
 
-                local found = false
-                for _ = 1, 20 do
-                    task.wait(0.5)
+                local foundUnitId = nil
+                while batch.done < batchSize do
+                    task.wait(0.2)
                     local liveOwned = SnipeFindOwnedUnits() or owned
                     local hasTarget, unitId = SnipeHasNewTarget(liveOwned, targetSnapshot, State.SnipeTargets)
-                    if hasTarget then
-                        local _, unitsData = SnipeGetGameData()
-                        local unitName = unitsData and unitsData[unitId] and unitsData[unitId].name or unitId
-                        SnipeStop("TARGET OBTAINED: " .. tostring(unitName))
-                        found = true
-                        break
-                    end
-                    if not SnipeRuntime.Running then break end
+                    if hasTarget and not foundUnitId then foundUnitId = unitId end
+                    -- A user stop prevents another batch; in-flight calls finish safely.
                 end
-                if found then break end
-                if SnipeRuntime.Running then task.wait(1.2) end
+
+                -- Recheck collection after every request in the batch has returned.
+                local liveOwned = SnipeFindOwnedUnits() or owned
+                local hasTarget, unitId = SnipeHasNewTarget(liveOwned, targetSnapshot, State.SnipeTargets)
+                if hasTarget then foundUnitId = unitId end
+
+                if foundUnitId then
+                    local _, unitsData = SnipeGetGameData()
+                    local unitName = unitsData and unitsData[foundUnitId] and unitsData[foundUnitId].name or foundUnitId
+                    SnipeStop("TARGET OBTAINED: " .. tostring(unitName))
+                    break
+                end
+                if batch.failed then
+                    SnipeStop("Summon request failed: " .. batch.failed)
+                    break
+                end
+                if not SnipeRuntime.Running then break end
+
+                local spent = math.max(
+                    math.max(0, startingBalance - (tonumber(currencyStat.Value) or 0)),
+                    launchedSummons * estimatedCost
+                )
+                SnipeSetStatus("Batch complete | " .. currencyLabel .. " spent/reserved: " .. spent,
+                    Color3.fromRGB(100, 220, 160))
             end
         end
     end)
 end
 
-CreateSection(SummonPage, "SNIPE SUMMON", 1)
+CreateSection(SummonPage, "SUMMON", 1)
 CreateHint(SummonPage, "Choose a banner and one or more target units. The system sends summons only to the selected banner and stops when a new target unit appears in your collection.", 2, 42)
 SnipeBannerSelectedLabel = SnipeMakeLabel(SummonPage, "Selected Banner: " .. (State.SnipeBanner ~= "" and State.SnipeBanner or "None"), 3, 22, Color3.fromRGB(120, 190, 255))
 CreateSection(SummonPage, "1. SELECT BANNER", 4)
@@ -4779,7 +6615,7 @@ SnipeRefreshButton = CreateButton(SummonPage, "Refresh Banners / Units", 11, fun
     SnipeSetStatus("Lists refreshed", Color3.fromRGB(100, 220, 160))
 end)
 SnipeStatusLabel = SnipeMakeLabel(SummonPage, "Status: Idle", 12, 34, Color3.fromRGB(190, 210, 230))
-SnipeStartButton = CreateButton(SummonPage, "Start Snipe Summon", 13, SnipeStart)
+SnipeStartButton = CreateButton(SummonPage, "Start Summon", 13, SnipeStart)
 SnipeBuildBannerList()
 SnipeBuildUnitList()
 SnipeModeButton.Text = "Summon Mode: " .. (State.SnipeSummonCount == 10 and "10x" or "1x") .. " (click to switch)"
@@ -4791,23 +6627,57 @@ end
 RefreshUnitConfigUI()
 
 -- Estimate the next upgrade price from live unit stats first, then unit data.
--- Unknown prices sort last instead of being mistaken for free upgrades.
+-- Unknown prices for non-maxed units fall back to 0 instead of math.huge so
+-- runtime-replicated units like Elfy (Sylph) are never skipped by AutoUpgrade.
 function GetNextUpgradeCost(unit)
     if not unit or not unit:FindFirstChild("_stats") then return math.huge end
     local stats = unit._stats
     local current = stats:FindFirstChild("upgrade")
     if not current then return math.huge end
+    local curLvl = tonumber(current.Value) or 0
+    local maxVal = stats:FindFirstChild("max_upgrade")
+    if maxVal and tonumber(maxVal.Value) and curLvl >= tonumber(maxVal.Value) then
+        return math.huge
+    end
+
+    SyncReplicatedGameData()
 
     -- Match the game's own pricing path:
     -- ceil(upgrade data cost * player_cost_scale * unit upgrade_cost_multiplier),
     -- with the _negate_high_cost cap applied by UnitServiceCore.
     local data = LookupUnitData(GetRawUnitId(unit))
     local upgrades = type(data) == "table" and data.upgrade or nil
-    local nextInfo = type(upgrades) == "table" and upgrades[(tonumber(current.Value) or 0) + 1] or nil
-    if type(nextInfo) ~= "table" then return math.huge end
+    local nextInfo = type(upgrades) == "table" and upgrades[curLvl + 1] or nil
+    local baseCost = type(nextInfo) == "table"
+        and tonumber(nextInfo.cost or nextInfo.upgrade_cost or nextInfo.price)
+        or nil
 
-    local baseCost = tonumber(nextInfo.cost or nextInfo.upgrade_cost or nextInfo.price)
-    if not baseCost then return math.huge end
+    if not baseCost then
+        local okGui, guiCost = pcall(function()
+            local pgui = player:FindFirstChild("PlayerGui")
+            local overview = pgui and pgui:FindFirstChild("UnitOverview")
+            local ref = overview and overview:FindFirstChild("_unit_char_ref")
+            if ref and ref.Value == unit then
+                local textObj = overview:FindFirstChild("Outer")
+                    and overview.Outer:FindFirstChild("buttons")
+                    and overview.Outer.buttons:FindFirstChild("Upgrade")
+                    and overview.Outer.buttons.Upgrade:FindFirstChild("Main")
+                    and overview.Outer.buttons.Upgrade.Main:FindFirstChild("Text")
+                local rawText = textObj and tostring(textObj.Text or "") or ""
+                local digits = rawText:gsub("[^%d]", "")
+                if digits ~= "" then
+                    return tonumber(digits)
+                end
+            end
+            return nil
+        end)
+        if okGui and tonumber(guiCost) then
+            return tonumber(guiCost)
+        end
+        -- Allow AutoUpgrade to attempt upgrading when replicator data is still
+        -- loading instead of permanently skipping Elfy (Sylph).
+        return 0
+    end
 
     local multiplier = 1
     local dataFolder = workspace:FindFirstChild("_DATA")
@@ -4870,6 +6740,7 @@ task.spawn(function()
         task.wait(0.5)
         local upgradeOk, upgradeErr = pcall(function()
         if State.AutoUpgrade and not IsInLobby() and workspace:FindFirstChild("_UNITS") ~= nil then
+            SyncReplicatedGameData()
             local units = GetPlayerUnits()
             local now = tick()
             local candidates = {}
@@ -4907,11 +6778,20 @@ task.spawn(function()
                         if allowed and not pendingRequest then
                             local cost = GetNextUpgradeCost(unit)
                             local cash = GetInGameCash()
+                            local activeVal = stats:FindFirstChild("active_attack")
+                            local hasActive = activeVal and tostring(activeVal.Value) ~= "" and tostring(activeVal.Value) ~= "nil"
+                            local needsBuffUnlock = IsPlacedBuffUnit(unit) and not hasActive
                             -- Only upgrades affordable with the current cash enter the
                             -- queue. Farm candidates receive priority, but an unaffordable
                             -- Farm does not prevent affordable non-Farm upgrades.
                             if cash == nil or (cost ~= math.huge and cost <= cash) then
-                                table.insert(candidates, { unit = unit, cost = cost, farm = isFarm, level = level.Value })
+                                table.insert(candidates, {
+                                    unit = unit,
+                                    cost = cost,
+                                    farm = isFarm,
+                                    buffUnlock = needsBuffUnlock,
+                                    level = level.Value,
+                                })
                             end
                         end
                     end
@@ -4936,20 +6816,24 @@ task.spawn(function()
             end
 
             if #candidates > 0 then
-                if State.AutoUpgradeFarmFirst then
-                    -- Any affordable Farm upgrade outranks every non-Farm upgrade.
-                    -- If no Farm upgrade is affordable, other affordable units remain
-                    -- eligible. Selection within each priority group stays random.
-                    local farmCandidates = {}
-                    local otherCandidates = {}
-                    for _, candidate in ipairs(candidates) do
-                        if candidate.farm then
-                            table.insert(farmCandidates, candidate)
-                        else
-                            table.insert(otherCandidates, candidate)
-                        end
+                local farmCandidates = {}
+                local buffUnlockCandidates = {}
+                local otherCandidates = {}
+                for _, candidate in ipairs(candidates) do
+                    if State.AutoUpgradeFarmFirst and candidate.farm then
+                        table.insert(farmCandidates, candidate)
+                    elseif candidate.buffUnlock then
+                        table.insert(buffUnlockCandidates, candidate)
+                    else
+                        table.insert(otherCandidates, candidate)
                     end
-                    candidates = #farmCandidates > 0 and farmCandidates or otherCandidates
+                end
+                if #farmCandidates > 0 then
+                    candidates = farmCandidates
+                elseif #buffUnlockCandidates > 0 then
+                    candidates = buffUnlockCandidates
+                else
+                    candidates = otherCandidates
                 end
 
                 -- Auto Upgrade randomly selects among all currently affordable
@@ -4978,6 +6862,321 @@ task.spawn(function()
     end
 end)
 
+-- Adaptive Commander / Windsong / Elfy (Sylph) buff loop.
+-- Elfy's static Units record omits the Verdant Enchantment active, but its
+-- live UnitUpgrade UI exposes the active through _stats.active_attack. Resolve
+-- and rotate that runtime active just like Commander and Windsong.
+--
+-- Loop rule per buff type (attack id):
+--   buffEnd = lastGroupCast + D
+--   cast ONE ready unit when tick() >= buffEnd - lead
+-- Each unit's readiness uses its own cooldown (SPD after Curse), so units with
+-- different Curse modifiers rotate correctly without overlapping buffs.
+function DidUnitStartActiveCast(unit, stats, beforeLastCast, beforeTrackId)
+    if not unit or not stats then return false end
+    local lastCastValue = stats:FindFirstChild("last_active_cast")
+    local liveCast = lastCastValue and tonumber(lastCastValue.Value) or 0
+    if liveCast > (beforeLastCast or 0) + 0.01 then
+        return true
+    end
+    local queuedValue = stats:FindFirstChild("active_queued_or_using")
+    if queuedValue and queuedValue.Value == true then
+        return true
+    end
+    local trackId = tonumber(unit:GetAttribute("client_track_active_attack_id")) or 0
+    if trackId > (beforeTrackId or 0) then
+        return true
+    end
+    if GetUnitOverheadReadyAttribute(unit) == false then
+        return true
+    end
+    return false
+end
+
+function ExecuteBuffActiveCast(unit)
+    if not unit or not unit.Parent then return false end
+    local stats = unit:FindFirstChild("_stats")
+    if not stats then return false end
+    if game:GetService("CollectionService"):HasTag(unit, "dying_units") then return false end
+
+    local lastCastValue = stats:FindFirstChild("last_active_cast")
+    local beforeLastCast = lastCastValue and tonumber(lastCastValue.Value) or 0
+    local beforeTrackId = tonumber(unit:GetAttribute("client_track_active_attack_id")) or 0
+
+    local attackId = ResolveUnitActiveAttackId(unit)
+    local attack = attackId and GetAttacksData()[attackId]
+    local pos = GetPlacedBuffUnitPosition(unit)
+    if not pos and unit:FindFirstChild("HumanoidRootPart") then
+        pos = unit.HumanoidRootPart.Position
+    end
+    local aoeParam = pos and { aoe_point = pos } or nil
+    local needsAoePoint = type(attack) == "table" and attack._sets_aoe_point == true
+
+    local castOk = false
+    pcall(function()
+        local res
+        if needsAoePoint and aoeParam then
+            res = InvokeEndpoint("use_active_attack", unit, aoeParam)
+        else
+            res = InvokeEndpoint("use_active_attack", unit)
+        end
+        castOk = (res ~= false)
+    end)
+
+    task.wait(0.15)
+    if not DidUnitStartActiveCast(unit, stats, beforeLastCast, beforeTrackId) then
+        pcall(function()
+            if not needsAoePoint and aoeParam then
+                InvokeEndpoint("use_active_attack", unit, aoeParam)
+            elseif needsAoePoint then
+                InvokeEndpoint("use_active_attack", unit)
+            end
+        end)
+    end
+    return castOk
+end
+
+-- Dedicated Infinity Buff rotation worker supporting Elfy, Commander, Windsong, and Generic/Hybrid Buffers
+-- Uses Event-Driven + Real-Time Attribute Drop & Escalation Detection for 0-downtime 100% buff loop
+task.spawn(function()
+    local BUFF_DURATION = 30
+    local groupTrackers = {
+        elfy = { lastCastTick = 0, lastAttemptTick = 0, lastUnit = nil, handOffThreshold = 0.35, lastBuffVal = 0, buffStartTick = 0 },
+        commander = { lastCastTick = 0, lastAttemptTick = 0, lastUnit = nil, handOffThreshold = 0.35, lastBuffVal = 0, buffStartTick = 0 },
+        windsong = { lastCastTick = 0, lastAttemptTick = 0, lastUnit = nil, handOffThreshold = 0.35, lastBuffVal = 0, buffStartTick = 0 },
+        hybrid = { lastCastTick = 0, lastAttemptTick = 0, lastUnit = nil, handOffThreshold = 0.35, lastBuffVal = 0, buffStartTick = 0 },
+    }
+
+    local BUFFER_GROUPS = {
+        {
+            key = "elfy",
+            displayName = "Elfy (Sylph)",
+            buffType = "Magic",
+            stateKey = "InfinityBuffElfy",
+            checkFn = IsElfyUnit,
+        },
+        {
+            key = "commander",
+            displayName = "Commander",
+            buffType = "Physical",
+            stateKey = "InfinityBuffCommander",
+            checkFn = IsCommanderUnit,
+        },
+        {
+            key = "windsong",
+            displayName = "Windsong",
+            buffType = "Magic",
+            stateKey = "InfinityBuffWindsong",
+            checkFn = IsWindsongUnit,
+        },
+        {
+            key = "hybrid",
+            displayName = "Generic/Hybrid",
+            buffType = "Magic",
+            stateKey = "InfinityBuffHybrid",
+            checkFn = IsGenericBufferUnit,
+        },
+    }
+
+    while true do
+        task.wait(0.05) -- High-frequency 50ms check for zero-downtime hand-off
+        local workerOk, workerErr = pcall(function()
+            local isEnabled = State.InfinityBuff or State.AutoBuffRotation
+            if not isEnabled then
+                for _, tracker in pairs(groupTrackers) do
+                    tracker.lastCastTick = 0
+                    tracker.lastUnit = nil
+                    tracker.lastBuffVal = 0
+                    tracker.buffStartTick = 0
+                end
+                SetBuffRotationStatus("Infinity Buff: Disabled", Color3.fromRGB(160, 160, 180))
+                return
+            end
+
+            if IsInLobby() or workspace:FindFirstChild("_UNITS") == nil then
+                for _, tracker in pairs(groupTrackers) do
+                    tracker.lastCastTick = 0
+                    tracker.lastUnit = nil
+                    tracker.lastBuffVal = 0
+                    tracker.buffStartTick = 0
+                end
+                SetBuffRotationStatus("Infinity Buff: Waiting for match...", Color3.fromRGB(160, 160, 180))
+                return
+            end
+
+            local allPlayerUnits = GetPlayerUnits()
+            local now = tick()
+            local activeGroupSummaries = {}
+            local totalBuffersPlaced = 0
+
+            for _, groupDef in ipairs(BUFFER_GROUPS) do
+                local tracker = groupTrackers[groupDef.key]
+                if State[groupDef.stateKey] ~= false then
+                    local groupUnits = {}
+                    for _, unit in ipairs(allPlayerUnits) do
+                        if groupDef.checkFn(unit) then
+                            local stats = unit:FindFirstChild("_stats")
+                            local active = stats and stats:FindFirstChild("active_attack")
+                            if active and active.Value ~= "nil" and active.Value ~= "" then
+                                table.insert(groupUnits, unit)
+                            end
+                        end
+                    end
+
+                    if #groupUnits > 0 then
+                        totalBuffersPlaced = totalBuffersPlaced + #groupUnits
+
+                        if #groupUnits < 3 then
+                            table.insert(activeGroupSummaries, string.format("%s: Placed %d/4 (Need >=3-4)", groupDef.displayName, #groupUnits))
+                        else
+                            -- 1. Sync actual last_active_cast and cooldown from units
+                            local maxUnitCd = 60
+                            for _, unit in ipairs(groupUnits) do
+                                local stats = unit:FindFirstChild("_stats")
+                                local lastCastVal = stats and stats:FindFirstChild("last_active_cast")
+                                local cdVal = stats and stats:FindFirstChild("active_attack_cooldown")
+                                local unitCd = (cdVal and tonumber(cdVal.Value)) or 60
+                                if unitCd > maxUnitCd then
+                                    maxUnitCd = unitCd
+                                end
+
+                                local lc = tonumber(lastCastVal and lastCastVal.Value) or 0
+                                if lc > tracker.lastCastTick and (now - lc) < (BUFF_DURATION + 5) then
+                                    tracker.lastCastTick = lc
+                                    tracker.lastUnit = unit
+                                end
+                            end
+
+                            -- 2. Read real-time buff multiplier
+                            local currentGroupBuff = 0
+                            for _, unit in ipairs(groupUnits) do
+                                local bVal = GetUnitBuffValue(unit, groupDef.buffType)
+                                if bVal > currentGroupBuff then
+                                    currentGroupBuff = bVal
+                                end
+                            end
+                            if currentGroupBuff <= 0 then
+                                local _, teamBuff = IsBuffTypeActiveOnUnits(allPlayerUnits, groupDef.buffType)
+                                currentGroupBuff = teamBuff or 0
+                            end
+
+                            -- Detect buff state changes (when buff drops or refreshes)
+                            local buffDropped = (tracker.lastBuffVal > 0 and currentGroupBuff < tracker.lastBuffVal - 0.01)
+                            if currentGroupBuff > tracker.lastBuffVal + 0.01 then
+                                tracker.buffStartTick = now
+                            end
+                            tracker.lastBuffVal = currentGroupBuff
+
+                            -- 3. Dynamic hand-off threshold with preCastMargin
+                            local curseRatio = maxUnitCd / 60.0
+                            local handOffThresh = math.clamp(0.35 * curseRatio, 0.20, 0.80)
+                            tracker.handOffThreshold = handOffThresh
+                            local effectiveThreshold = math.max(0.10, tracker.handOffThreshold - 0.10)
+
+                            local timeSinceLast = tracker.lastCastTick > 0 and (now - tracker.lastCastTick) or 9999
+                            local isRunning = (timeSinceLast < BUFF_DURATION) and (currentGroupBuff > 0 or timeSinceLast < 1.5)
+                            local remTime = isRunning and math.max(0, BUFF_DURATION - timeSinceLast) or 0
+
+                            local shouldCastNext = (not isRunning) or buffDropped or (remTime <= effectiveThreshold)
+
+                            if shouldCastNext then
+                                if (now - tracker.lastAttemptTick) >= 0.25 then
+                                    local readyCandidates = {}
+                                    local minCd = 9999
+
+                                    for idx, unit in ipairs(groupUnits) do
+                                        local isReady, cdRem = GetUnitActiveReadyStatus(unit)
+                                        local stats = unit:FindFirstChild("_stats")
+                                        local lastCastVal = stats and stats:FindFirstChild("last_active_cast")
+                                        local lc = tonumber(lastCastVal and lastCastVal.Value) or 0
+                                        local unitBuffVal = GetUnitBuffValue(unit, groupDef.buffType)
+
+                                        if isReady and (now - lc) > 2.0 then
+                                            table.insert(readyCandidates, {
+                                                unit = unit,
+                                                lastCast = lc,
+                                                buffVal = unitBuffVal,
+                                                index = idx
+                                            })
+                                        else
+                                            if cdRem < minCd then
+                                                minCd = cdRem
+                                            end
+                                        end
+                                    end
+
+                                    if #readyCandidates > 0 then
+                                        if #groupUnits > 1 and #readyCandidates > 1 and tracker.lastUnit then
+                                            local filtered = {}
+                                            for _, cand in ipairs(readyCandidates) do
+                                                if cand.unit ~= tracker.lastUnit then
+                                                    table.insert(filtered, cand)
+                                                end
+                                            end
+                                            if #filtered > 0 then
+                                                readyCandidates = filtered
+                                            end
+                                        end
+
+                                        -- Sort candidates: highest buff multiplier first, then FIFO
+                                        table.sort(readyCandidates, function(a, b)
+                                            if math.abs(a.buffVal - b.buffVal) > 0.01 then
+                                                return a.buffVal > b.buffVal
+                                            end
+                                            if math.abs(a.lastCast - b.lastCast) > 0.5 then
+                                                return a.lastCast < b.lastCast
+                                            end
+                                            return a.index < b.index
+                                        end)
+
+                                        local chosen = readyCandidates[1].unit
+                                        tracker.lastAttemptTick = now
+
+                                        local castOk = ExecuteBuffActiveCast(chosen)
+                                        if castOk then
+                                            tracker.lastCastTick = now
+                                            tracker.lastUnit = chosen
+                                            local pct = math.floor((currentGroupBuff > 0 and currentGroupBuff or 0.25) * 100 + 0.5)
+                                            table.insert(activeGroupSummaries, string.format("%s: Cast (%d%% -> 100%%)", groupDef.displayName, pct))
+                                        else
+                                            table.insert(activeGroupSummaries, string.format("%s: Retry Cast...", groupDef.displayName))
+                                        end
+                                    else
+                                        if minCd < 9999 then
+                                            table.insert(activeGroupSummaries, string.format("%s: Wait CD %.1fs", groupDef.displayName, minCd))
+                                        else
+                                            table.insert(activeGroupSummaries, string.format("%s: Wait Skill (Upgrade Unit)", groupDef.displayName))
+                                        end
+                                    end
+                                else
+                                    local pct = math.floor(currentGroupBuff * 100 + 0.5)
+                                    table.insert(activeGroupSummaries, string.format("%s: Syncing (%d%%)", groupDef.displayName, pct))
+                                end
+                            else
+                                local pct = math.floor((currentGroupBuff > 0 and currentGroupBuff or 1) * 100 + 0.5)
+                                local rangeWarn = (not AreUnitsInRange(groupUnits)) and " [Check Range]" or ""
+                                table.insert(activeGroupSummaries, string.format("%s: %.1fs (%d%% %s) [buf: %.2fs]%s", groupDef.displayName, remTime, pct, groupDef.buffType, tracker.handOffThreshold, rangeWarn))
+                            end
+                        end
+                    end
+                end
+            end
+
+            if totalBuffersPlaced == 0 then
+                SetBuffRotationStatus("Infinity Buff: No buffer units placed", Color3.fromRGB(240, 170, 80))
+            elseif #activeGroupSummaries > 0 then
+                SetBuffRotationStatus("Infinity Buff: " .. table.concat(activeGroupSummaries, " | "), Color3.fromRGB(80, 230, 160))
+            end
+        end)
+
+        if not workerOk then
+            pcall(function()
+                SetBuffRotationStatus("Worker Error: " .. tostring(workerErr), Color3.fromRGB(255, 100, 100))
+            end)
+            task.wait(0.75)
+        end
+    end
+end)
 task.spawn(function()
     while true do
         task.wait(0.5)
@@ -4990,6 +7189,7 @@ task.spawn(function()
         end
 
         if not IsInLobby() and workspace:FindFirstChild("_UNITS") ~= nil then
+            SyncReplicatedGameData()
             local myUnits = GetPlayerUnits()
             local wave = GetCurrentWave()
 
@@ -5050,6 +7250,7 @@ task.spawn(function()
                     -- Farm First changes candidate priority only: it never blocks other
                     -- placements when the next Farm is unaffordable or has reached its cap.
                     local farmEligible = {}
+                    local buffEligible = {}
                     local otherEligible = {}
                     for _, unitInfo in ipairs(equipped) do
                         local uuidKey = tostring(unitInfo.uuid or "")
@@ -5059,28 +7260,40 @@ task.spawn(function()
                             if State.AutoUpgradeFarmFirst and IsFarmInfo(unitInfo) then
                                 table.insert(farmEligible, unitInfo)
                             elseif not holdOtherPlacementForFarmUpgrade then
-                                table.insert(otherEligible, unitInfo)
+                                if IsBuffUnitInfo(unitInfo) then
+                                    table.insert(buffEligible, unitInfo)
+                                else
+                                    table.insert(otherEligible, unitInfo)
+                                end
                             end
                         end
                     end
 
-                    -- Prefer placing Farm units early. If no Farm is currently
-                    -- affordable/placeable, immediately fall back to any other unit.
+                    -- Prefer placing Farm units early. Next, establish the buff
+                    -- cluster so combat units and buff units form one tight group.
                     if State.AutoUpgradeFarmFirst and #farmEligible > 0 then
                         eligible = farmEligible
+                    elseif #buffEligible > 0 then
+                        eligible = buffEligible
+                        for _, info in ipairs(otherEligible) do
+                            table.insert(eligible, info)
+                        end
                     else
                         eligible = otherEligible
                     end
 
                     if #eligible > 0 then
-                        -- Randomly select among the currently eligible units. If one
-                        -- has no valid placement surface, try the next candidate.
-                        for i = #eligible, 2, -1 do
-                            local j = math.random(1, i)
-                            eligible[i], eligible[j] = eligible[j], eligible[i]
+                        -- Shuffle within the non-buff pool only when no buff unit is
+                        -- waiting; keep buff units at the front of the queue so they
+                        -- anchor the cluster tightly.
+                        if #buffEligible == 0 or (State.AutoUpgradeFarmFirst and #farmEligible > 0) then
+                            for i = #eligible, 2, -1 do
+                                local j = math.random(1, i)
+                                eligible[i], eligible[j] = eligible[j], eligible[i]
+                            end
                         end
                         for _, chosen in ipairs(eligible) do
-                            local placeIndex = #myUnits + math.random(1, 12)
+                            local placeIndex = #myUnits + 1
                             local cframe, kind = GetPlacementCFrameForInfo(placeIndex, chosen)
                             if cframe then
                                 local countBefore = CountPlacedInfo(chosen)
@@ -5112,273 +7325,6 @@ task.spawn(function()
             -- Keep the automation loop alive if one game-state read fails.
             pcall(function()
                 UpdateAutoPlayStatus("Auto Place Worker Error: " .. tostring(workerError), Color3.fromRGB(255, 100, 100))
-            end)
-            task.wait(0.5)
-        end
-    end
-end)
-
--- Check if all buffer units in a group are within buff range of each other
-function AreUnitsInRange(units)
-    if #units < 2 then return true end
-    for i = 1, #units - 1 do
-        for j = i + 1, #units do
-            local statsA = units[i]:FindFirstChild("_stats")
-            local statsB = units[j]:FindFirstChild("_stats")
-            local rA = (statsA and statsA:FindFirstChild("range") and tonumber(statsA.range.Value)) or 25
-            local rB = (statsB and statsB:FindFirstChild("range") and tonumber(statsB.range.Value)) or 25
-            local maxRange = math.max(rA, rB, 25) + 5
-            local partA = units[i]:FindFirstChild("HumanoidRootPart") or units[i].PrimaryPart or units[i]:FindFirstChildWhichIsA("BasePart")
-            local partB = units[j]:FindFirstChild("HumanoidRootPart") or units[j].PrimaryPart or units[j]:FindFirstChildWhichIsA("BasePart")
-            if partA and partB then
-                local dist2D = Vector2.new(partA.Position.X - partB.Position.X, partA.Position.Z - partB.Position.Z).Magnitude
-                if dist2D > maxRange then
-                    return false
-                end
-            end
-        end
-    end
-    return true
-end
-
--- Dedicated Infinity Buff rotation worker supporting Elfy (Sylph), Commander (Erwin), and Windsong (Wendy)
--- Uses Event-Driven + Real-Time Attribute Drop & Escalation Detection for 0-downtime 100% buff loop
-task.spawn(function()
-    local BUFF_DURATION = 30
-    local groupTrackers = {
-        elfy = { lastCastTick = 0, lastAttemptTick = 0, lastUnit = nil, handOffThreshold = 0.35, lastBuffVal = 0, buffStartTick = 0 },
-        commander = { lastCastTick = 0, lastAttemptTick = 0, lastUnit = nil, handOffThreshold = 0.35, lastBuffVal = 0, buffStartTick = 0 },
-        windsong = { lastCastTick = 0, lastAttemptTick = 0, lastUnit = nil, handOffThreshold = 0.35, lastBuffVal = 0, buffStartTick = 0 },
-    }
-
-    local BUFFER_GROUPS = {
-        {
-            key = "elfy",
-            displayName = "Elfy (Sylph)",
-            buffType = "Magic",
-            stateKey = "InfinityBuffElfy",
-            checkFn = IsElfyUnit,
-        },
-        {
-            key = "commander",
-            displayName = "Commander",
-            buffType = "Physical",
-            stateKey = "InfinityBuffCommander",
-            checkFn = IsCommanderUnit,
-        },
-        {
-            key = "windsong",
-            displayName = "Windsong",
-            buffType = "Magic",
-            stateKey = "InfinityBuffWindsong",
-            checkFn = IsWindsongUnit,
-        },
-    }
-
-    while true do
-        task.wait(0.05) -- High-frequency 50ms check for zero-downtime hand-off
-        local workerOk, workerErr = pcall(function()
-            if not State.InfinityBuff then
-                return
-            end
-
-            if IsInLobby() or workspace:FindFirstChild("_UNITS") == nil then
-                for _, tracker in pairs(groupTrackers) do
-                    tracker.lastCastTick = 0
-                    tracker.lastUnit = nil
-                    tracker.lastBuffVal = 0
-                    tracker.buffStartTick = 0
-                end
-                UpdateInfinityBuffStatus("Idle (Waiting for Match)", Color3.fromRGB(160, 160, 180))
-                return
-            end
-
-            local allPlayerUnits = GetPlayerUnits()
-            local now = tick()
-            local activeGroupSummaries = {}
-            local totalBuffersPlaced = 0
-
-            for _, groupDef in ipairs(BUFFER_GROUPS) do
-                local tracker = groupTrackers[groupDef.key]
-                if State[groupDef.stateKey] ~= false then
-                    local groupUnits = {}
-                    for _, unit in ipairs(allPlayerUnits) do
-                        if groupDef.checkFn(unit) then
-                            local stats = unit:FindFirstChild("_stats")
-                            local active = stats and stats:FindFirstChild("active_attack")
-                            if active and active.Value ~= "nil" and active.Value ~= "" then
-                                table.insert(groupUnits, unit)
-                            end
-                        end
-                    end
-
-                    if #groupUnits > 0 then
-                        totalBuffersPlaced = totalBuffersPlaced + #groupUnits
-
-                        if #groupUnits < 3 then
-                            table.insert(activeGroupSummaries, string.format("%s: Placed %d/4 (Need >=3-4)", groupDef.displayName, #groupUnits))
-                        else
-                            -- 1. Sync actual last_active_cast from all units in this group
-                            -- And calculate each unit's real active cooldown (accounting for Curse / Traits)
-                            local maxUnitCd = 60
-                            for _, unit in ipairs(groupUnits) do
-                                local stats = unit:FindFirstChild("_stats")
-                                local lastCastVal = stats and stats:FindFirstChild("last_active_cast")
-                                local cdVal = stats and stats:FindFirstChild("active_attack_cooldown")
-                                local unitCd = (cdVal and tonumber(cdVal.Value)) or 60
-                                if unitCd > maxUnitCd then
-                                    maxUnitCd = unitCd
-                                end
-
-                                local lc = tonumber(lastCastVal and lastCastVal.Value) or 0
-                                if lc > tracker.lastCastTick and (now - lc) < (BUFF_DURATION + 5) then
-                                    tracker.lastCastTick = lc
-                                    tracker.lastUnit = unit
-                                end
-                            end
-
-                            -- 2. Read real-time buff multiplier on the buffer units themselves
-                            local currentGroupBuff = 0
-                            for _, unit in ipairs(groupUnits) do
-                                local bVal = GetUnitBuffValue(unit, groupDef.buffType)
-                                if bVal > currentGroupBuff then
-                                    currentGroupBuff = bVal
-                                end
-                            end
-                            if currentGroupBuff <= 0 then
-                                local _, teamBuff = IsBuffTypeActiveOnUnits(allPlayerUnits, groupDef.buffType)
-                                currentGroupBuff = teamBuff or 0
-                            end
-
-                            -- Detect buff state changes (when buff drops or refreshes)
-                            local buffDropped = (tracker.lastBuffVal > 0 and currentGroupBuff < tracker.lastBuffVal - 0.01)
-                            if currentGroupBuff > tracker.lastBuffVal + 0.01 then
-                                tracker.buffStartTick = now
-                            end
-                            tracker.lastBuffVal = currentGroupBuff
-
-                            -- 3. Calculate precise timing and hand-off threshold per unit cooldown
-                            -- Standard active skill duration = 30s, base cooldown = 60s.
-                            -- With 4 units and +SPA curse (e.g. 61.5s - 66s cooldown), each cast must happen
-                            -- right as the previous buff expires (or 0.25s-0.45s before expiry so animations/network resolve in time).
-                            local curseRatio = maxUnitCd / 60.0
-                            local safetyMargin = 0.35 -- Pre-cast 0.35s before buff expires to beat network latency
-                            local handOffThresh = math.clamp(safetyMargin * curseRatio, 0.20, 0.80)
-                            tracker.handOffThreshold = handOffThresh
-
-                            local timeSinceLast = tracker.lastCastTick > 0 and (now - tracker.lastCastTick) or 9999
-                            local isRunning = (timeSinceLast < BUFF_DURATION) and (currentGroupBuff > 0 or timeSinceLast < 1.5)
-                            local remTime = isRunning and math.max(0, BUFF_DURATION - timeSinceLast) or 0
-
-                            -- Trigger next cast if:
-                            -- a) No buff is currently running, OR
-                            -- b) Buff multiplier just dropped (previous tier expired!), OR
-                            -- c) Remaining duration on current 30s buff is within handOffThreshold
-                            local shouldCastNext = (not isRunning) or buffDropped or (remTime <= tracker.handOffThreshold)
-
-                            if shouldCastNext then
-                                if (now - tracker.lastAttemptTick) >= 0.25 then
-                                    local readyCandidates = {}
-                                    local minCd = 9999
-
-                                    for idx, unit in ipairs(groupUnits) do
-                                        local isReady, cdRem = GetUnitActiveReadyStatus(unit)
-                                        local stats = unit:FindFirstChild("_stats")
-                                        local lastCastVal = stats and stats:FindFirstChild("last_active_cast")
-                                        local lc = tonumber(lastCastVal and lastCastVal.Value) or 0
-                                        local unitBuffVal = GetUnitBuffValue(unit, groupDef.buffType)
-
-                                        -- Prevent double-casting a unit that just cast within 2 seconds
-                                        if isReady and (now - lc) > 2.0 then
-                                            table.insert(readyCandidates, {
-                                                unit = unit,
-                                                lastCast = lc,
-                                                buffVal = unitBuffVal,
-                                                index = idx
-                                            })
-                                        else
-                                            if cdRem < minCd then
-                                                minCd = cdRem
-                                            end
-                                        end
-                                    end
-
-                                    if #readyCandidates > 0 then
-                                        -- Exclude the unit that cast most recently if another unit is ready
-                                        if #groupUnits > 1 and #readyCandidates > 1 and tracker.lastUnit then
-                                            local filtered = {}
-                                            for _, cand in ipairs(readyCandidates) do
-                                                if cand.unit ~= tracker.lastUnit then
-                                                    table.insert(filtered, cand)
-                                                end
-                                            end
-                                            if #filtered > 0 then
-                                                readyCandidates = filtered
-                                            end
-                                        end
-
-                                        -- Sort candidates:
-                                        -- 1) Prefer the unit that currently has the HIGHEST buff multiplier on itself (to escalate 25% -> 56% -> 95% -> 100%)
-                                        -- 2) Tie-breaker: unit that cast longest ago (FIFO rotation 1 -> 2 -> 3 -> 4 -> 1)
-                                        table.sort(readyCandidates, function(a, b)
-                                            if math.abs(a.buffVal - b.buffVal) > 0.01 then
-                                                return a.buffVal > b.buffVal
-                                            end
-                                            if math.abs(a.lastCast - b.lastCast) > 0.5 then
-                                                return a.lastCast < b.lastCast
-                                            end
-                                            return a.index < b.index
-                                        end)
-
-                                        local chosen = readyCandidates[1].unit
-                                        tracker.lastAttemptTick = now
-
-                                        local castOk = false
-                                        pcall(function()
-                                            local res = InvokeEndpoint("use_active_attack", chosen)
-                                            castOk = (res ~= false)
-                                        end)
-
-                                        if castOk then
-                                            -- Wait up to 0.3s to verify server accepted the cast (last_active_cast updated)
-                                            tracker.lastCastTick = now
-                                            tracker.lastUnit = chosen
-                                            local pct = math.floor((currentGroupBuff > 0 and currentGroupBuff or 0.25) * 100 + 0.5)
-                                            table.insert(activeGroupSummaries, string.format("%s: Cast (%d%% -> 100%%)", groupDef.displayName, pct))
-                                        else
-                                            table.insert(activeGroupSummaries, string.format("%s: Retry Cast...", groupDef.displayName))
-                                        end
-                                    else
-                                        if minCd < 9999 then
-                                            table.insert(activeGroupSummaries, string.format("%s: Wait CD %.1fs", groupDef.displayName, minCd))
-                                        else
-                                            table.insert(activeGroupSummaries, string.format("%s: Wait Skill (Upgrade Unit)", groupDef.displayName))
-                                        end
-                                    end
-                                else
-                                    local pct = math.floor(currentGroupBuff * 100 + 0.5)
-                                    table.insert(activeGroupSummaries, string.format("%s: Syncing (%d%%)", groupDef.displayName, pct))
-                                end
-                            else
-                                local pct = math.floor((currentGroupBuff > 0 and currentGroupBuff or 1) * 100 + 0.5)
-                                local rangeWarn = (not AreUnitsInRange(groupUnits)) and " [Check Range]" or ""
-                                table.insert(activeGroupSummaries, string.format("%s: %.1fs (%d%% %s)%s", groupDef.displayName, remTime, pct, groupDef.buffType, rangeWarn))
-                            end
-                        end
-                    end
-                end
-            end
-
-            if totalBuffersPlaced == 0 then
-                UpdateInfinityBuffStatus("No buffer units (Elfy / Commander / Windsong) placed", Color3.fromRGB(240, 170, 80))
-            elseif #activeGroupSummaries > 0 then
-                UpdateInfinityBuffStatus(table.concat(activeGroupSummaries, " | "), Color3.fromRGB(80, 230, 160))
-            end
-        end)
-
-        if not workerOk then
-            pcall(function()
-                UpdateInfinityBuffStatus("Worker Error: " .. tostring(workerErr), Color3.fromRGB(255, 100, 100))
             end)
             task.wait(0.5)
         end
@@ -5464,6 +7410,7 @@ webhookUnitLinesSnapshot = nil
 webhookResultTitleAtStart = nil
 webhookResultsVisibleAtStart = false
 webhookResultSettingsAtStart = nil
+webhookNextResultReadAt = 0
 
 local initialDataForWebhook = workspace:FindFirstChild("_DATA")
 local initialFinishedForWebhook = initialDataForWebhook and initialDataForWebhook:FindFirstChild("GameFinished")
@@ -5473,6 +7420,7 @@ webhookResultsVisibleLast = initialResultsForWebhook ~= nil and initialResultsFo
 webhookLastSentSettings = nil
 webhookBoundGameFinished = nil
 webhookBoundResultsGui = nil
+webhookMatchToken = 0
 
 function StartWebhookEndSend(reason)
     if not webhookEndDetected or not State.WebhookOnEnd or webhookSent or webhookSending then
@@ -5480,24 +7428,28 @@ function StartWebhookEndSend(reason)
     end
 
     webhookSending = true
-    local currencyBaseline = webhookCurrencyBefore and table.clone(webhookCurrencyBefore) or nil
+    local sendToken = webhookMatchToken
+    local currencyBaseline = SafeCloneTable(webhookCurrencyBefore)
     local secretBaseline = webhookSecretRewardBefore
     local secretAvailable = webhookSecretRewardBaselineAvailable
     local unitLinesSnapshot = webhookUnitLinesSnapshot
 
-    print("[Octoput Hub Webhook] Sending match result. Trigger: " .. tostring(reason or "result"))
+    print("[Octoput Hub Webhook] Triggering webhook send. Reason: " .. tostring(reason or "result"))
     task.spawn(function()
-        local callOk, sendResult = pcall(SendEndWebhook, currencyBaseline, secretBaseline, secretAvailable, unitLinesSnapshot)
+        local callOk, sendResult, sendError, retryDelay = pcall(function()
+            return SendEndWebhook(currencyBaseline, secretBaseline, secretAvailable, unitLinesSnapshot)
+        end)
+        -- Always unlock sending so future matches/retries are never blocked
         webhookSending = false
         if callOk and sendResult == true then
             webhookSent = true
             local finalDetails = GetResultDetails()
             webhookLastSentSettings = finalDetails and finalDetails.settings or nil
-            print("[Octoput Hub Webhook] Match-end webhook confirmed sent.")
+            print("[Octoput Hub Webhook] Match-end webhook confirmed sent successfully!")
         else
-            local failure = callOk and "SendEndWebhook returned false" or tostring(sendResult)
+            local failure = callOk and tostring(sendError or "SendEndWebhook returned false") or tostring(sendResult)
             warn("[Octoput Hub Webhook] Send failed: " .. failure)
-            webhookRetryAt = os.clock() + 8
+            webhookRetryAt = os.clock() + math.clamp(tonumber(retryDelay) or 4, 2, 60)
         end
     end)
     return true
@@ -5505,10 +7457,16 @@ end
 
 function MarkWebhookEnd(reason)
     if not webhookEndDetected then
-        webhookUnitLinesSnapshot = ReadMatchUnitLines()
+        -- Commit the end state first. Optional snapshot readers must never block
+        -- the webhook trigger if a folder/module disappears during match teardown.
         webhookEndDetected = true
         webhookGameWasActive = false
-        print("[Octoput Hub Webhook] Match end detected by " .. tostring(reason or "game result") .. ".")
+        local snapshotOk, snapshot = pcall(ReadMatchUnitLines)
+        webhookUnitLinesSnapshot = snapshotOk and snapshot or nil
+        if not snapshotOk then
+            warn("[Octoput Hub Webhook] Unit snapshot failed: " .. tostring(snapshot))
+        end
+        print("[Octoput Hub Webhook] END DETECTED by " .. tostring(reason or "game result") .. ".")
     end
     StartWebhookEndSend(reason)
 end
@@ -5520,6 +7478,7 @@ task.spawn(function()
             local dataFolder = workspace:FindFirstChild("_DATA")
             if dataFolder ~= webhookDataFolder then
                 webhookDataFolder = dataFolder
+                webhookMatchToken = webhookMatchToken + 1
                 webhookGameWasActive = false
                 webhookEndDetected = false
                 webhookSent = false
@@ -5530,6 +7489,7 @@ task.spawn(function()
                 webhookSecretRewardBaselineAvailable = false
                 webhookUnitLinesSnapshot = nil
                 webhookResultSettingsAtStart = nil
+                webhookNextResultReadAt = 0
                 local finishedValue = dataFolder and dataFolder:FindFirstChild("GameFinished")
                 webhookFinishedLastValue = finishedValue ~= nil and finishedValue.Value == true
             end
@@ -5545,9 +7505,11 @@ task.spawn(function()
                 webhookBoundGameFinished = gameFinished
                 if gameFinished then
                     gameFinished.Changed:Connect(function()
-                        if gameFinished.Value == true then
+                        if webhookBoundGameFinished == gameFinished
+                            and workspace:FindFirstChild("_DATA") == webhookDataFolder
+                            and gameFinished.Value == true then
                             task.spawn(function()
-                                task.wait(0.15)
+                                task.wait(0.05)
                                 MarkWebhookEnd("GameFinished.Changed")
                             end)
                         end
@@ -5558,9 +7520,11 @@ task.spawn(function()
                 webhookBoundResultsGui = resultsGui
                 if resultsGui then
                     resultsGui:GetPropertyChangedSignal("Enabled"):Connect(function()
-                        if resultsGui.Enabled == true then
+                        if webhookBoundResultsGui == resultsGui
+                            and playerGui:FindFirstChild("ResultsUI") == resultsGui
+                            and resultsGui.Enabled == true then
                             task.spawn(function()
-                                task.wait(0.1)
+                                task.wait(0.05)
                                 local details = GetResultDetails()
                                 local title = string.upper(tostring(details.result or ""))
                                 if title:find("VICTORY", 1, true) or title:find("DEFEAT", 1, true) then
@@ -5577,7 +7541,22 @@ task.spawn(function()
             local finishedRising = finished and not webhookFinishedLastValue
             webhookFinishedLastValue = finished
 
-            local resultDetails = resultsVisible and GetResultDetails() or nil
+            -- Read the result controller even while its ScreenGui is disabled.
+            -- In BlackScreen / low-render mode, waiting for the UI to become visible
+            -- can delay the result edge until the client receives fresh input.
+            local resultDetails = {}
+            -- getgc(true) is an expensive executor scan. Only inspect result
+            -- controller tables near completion, and throttle the scan.
+            if (resultsVisible or finished or webhookEndDetected)
+                and os.clock() >= (webhookNextResultReadAt or 0) then
+                webhookNextResultReadAt = os.clock() + 0.75
+                local readOk, details = pcall(GetResultDetails)
+                if readOk and type(details) == "table" then
+                    resultDetails = details
+                elseif not readOk then
+                    warn("[Octoput Hub Webhook] Result read failed: " .. tostring(details))
+                end
+            end
             local resultTitle = string.upper(tostring(resultDetails and resultDetails.result or ""))
             local currentSettings = resultDetails and resultDetails.settings or nil
             local resultsRising = resultsVisible and not webhookResultsVisibleLast
@@ -5590,8 +7569,10 @@ task.spawn(function()
                 and currentSettings ~= webhookLastSentSettings
             local hasResultTitle = resultTitle:find("VICTORY", 1, true) ~= nil
                 or resultTitle:find("DEFEAT", 1, true) ~= nil
-            local resultScreenConfirmed = resultsVisible and hasResultTitle
-                and (freshResultSettings or resultsRising)
+            -- A fresh settings payload with a definitive result is enough to
+            -- confirm completion; do not require ResultsUI.Enabled to flip first.
+            local resultScreenConfirmed = hasResultTitle
+                and (freshResultSettings or (resultsVisible and resultsRising))
 
             -- GameStarted is the normal baseline point. If the monitor misses
             -- that edge, a fresh ResultsUI transition / GameFinished edge still
@@ -5600,14 +7581,26 @@ task.spawn(function()
             local startedByWorld = unitsFolder ~= nil and not IsInLobby() and not finished
             local isActive = (startedByFlag or startedByWorld) and not finished
             if isActive and not webhookGameWasActive then
-                local currencySnapshot, secretSnapshot, secretAvailable = CaptureWebhookCurrencyBaseline()
-                webhookCurrencyBefore = currencySnapshot
-                webhookSecretRewardBefore = secretSnapshot
-                webhookSecretRewardBaselineAvailable = secretAvailable
+                webhookMatchToken = webhookMatchToken + 1
+                -- A new match owns a fresh send slot; older requests are token-isolated.
+                webhookSending = false
+                -- Mark the match active before optional inventory readers run.
+                -- A transient getgc/profile error must not prevent end detection.
                 webhookGameWasActive = true
+                local baselineOk, currencySnapshot, secretSnapshot, secretAvailable =
+                    pcall(CaptureWebhookCurrencyBaseline)
+                if baselineOk then
+                    webhookCurrencyBefore = currencySnapshot
+                    webhookSecretRewardBefore = secretSnapshot
+                    webhookSecretRewardBaselineAvailable = secretAvailable == true
+                else
+                    webhookCurrencyBefore = ReadPlayerCurrencies()
+                    webhookSecretRewardBefore = nil
+                    webhookSecretRewardBaselineAvailable = false
+                    warn("[Octoput Hub Webhook] Baseline capture failed: " .. tostring(currencySnapshot))
+                end
                 webhookEndDetected = false
                 webhookSent = false
-                webhookSending = false
                 webhookRetryAt = 0
                 webhookUnitLinesSnapshot = nil
                 webhookResultTitleAtStart = resultTitle
